@@ -69,10 +69,19 @@ function checkType(value: Json, type: string): boolean {
   }
 }
 
+/** Annotation keys are allowed but must be well-formed strings when present. */
+function annotationsOk(schema: Record<string, unknown>): boolean {
+  for (const k of ["description", "title", "$schema"] as const) {
+    if (hasOwn(schema, k) && typeof (schema as any)[k] !== "string") return false;
+  }
+  return true;
+}
+
 /** Whether this schema is eligible for direct-mode planning at all. */
 export function isDirectEligibleSchema(schema: JsonSchema | undefined): boolean {
   if (!isObject(schema)) return false;
   for (const k of Object.keys(schema)) if (!ALLOWED_TOP.has(k)) return false;
+  if (!annotationsOk(schema)) return false;
   if (!hasOwn(schema, "type") || (schema as any).type !== "object") return false;
   if (hasOwn(schema, "properties") && !isObject((schema as any).properties)) return false;
   if (hasOwn(schema, "required")) {
@@ -84,6 +93,7 @@ export function isDirectEligibleSchema(schema: JsonSchema | undefined): boolean 
   for (const prop of Object.values(props)) {
     if (!isObject(prop)) return false;
     for (const k of Object.keys(prop)) if (!ALLOWED_PROP.has(k)) return false;
+    if (hasOwn(prop, "description") && typeof (prop as any).description !== "string") return false;
     if (hasOwn(prop, "type")) {
       const t = (prop as any).type;
       if (typeof t !== "string" || !KNOWN_TYPES.has(t)) return false;
@@ -106,6 +116,7 @@ export function validateDirectArgs(
   for (const k of Object.keys(schema)) {
     if (!ALLOWED_TOP.has(k)) return { ok: false, reason: `unsupported:${k}` };
   }
+  if (!annotationsOk(schema)) return { ok: false, reason: "malformed_annotation" };
   if (!hasOwn(schema, "type") || (schema as any).type !== "object") return { ok: false, reason: "non_object_schema" };
   if (hasOwn(schema, "properties") && !isObject((schema as any).properties))
     return { ok: false, reason: "malformed_properties" };
@@ -139,6 +150,8 @@ export function validateDirectArgs(
     for (const k of Object.keys(prop)) {
       if (!ALLOWED_PROP.has(k)) return { ok: false, reason: `unsupported_prop:${name}:${k}` };
     }
+    if (hasOwn(prop, "description") && typeof (prop as any).description !== "string")
+      return { ok: false, reason: `malformed_annotation:${name}` };
     if (hasOwn(prop, "const")) {
       if (!deepEqual(value, (prop as any).const as Json)) return { ok: false, reason: `const_mismatch:${name}` };
     }
