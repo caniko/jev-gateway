@@ -83,13 +83,28 @@ const OPENCODE_PROVIDER = "jev-gateway";
 /**
  * Stable custom-provider config for the launched OpenCode process. Injected through
  * OPENCODE_CONFIG_CONTENT — inline config merges over the user's global/project files, which
- * are never written. `@ai-sdk/openai-compatible` speaks `/v1/chat/completions` off
- * `${origin}/v1`, an endpoint the gateway already routes. `{env:OPENAI_API_KEY}` reuses the
- * user's own OpenAI credential untouched (resolving to empty when unset, like OpenCode's own
- * local-provider examples). The launcher-spawned gateway forwards that client credential
- * untouched: launcher.mjs strips UPSTREAM_API_KEY/ROUTER_API_KEY by design, so no gateway
- * key swap applies here. TYPESAFE_API_KEY is separate — it only authorizes the Jev
- * tool-selection call and is never sent as the LLM upstream credential.
+ * are never written. v2 native `providers` uses `@opencode/ai/providers/openai-compatible`
+ * speaking `/v1/chat/completions` off `${origin}/v1`, an endpoint the gateway already routes;
+ * legacy v1 `provider` (`@ai-sdk/openai-compatible`) is retained so existing v1 clients keep
+ * working. `env: ["OPENAI_API_KEY"]` / `{env:OPENAI_API_KEY}` reuses the user's own OpenAI
+ * credential untouched (resolving to empty when unset). The launcher-spawned gateway forwards
+ * that client credential untouched: launcher.mjs strips UPSTREAM_API_KEY/ROUTER_API_KEY by
+ * design, so no gateway key swap applies here. TYPESAFE_API_KEY is separate — it only
+ * authorizes the Jev tool-selection call and is never sent as the LLM upstream credential.
+ *
+ * Model identity is preserved: JEV_OPENCODE_MODEL (default gpt-5) selects
+ * `jev-gateway/<model>`; explicit `opencode -m provider/model` keeps top priority because
+ * the launcher injects no leading args. ARGS_MODEL (gateway forced-path model) defaults to
+ * the request's own model; when set it must be a model ID valid for the upstream provider —
+ * it never silently switches to a default paid provider. Capabilities/limits are not invented:
+ * the gateway does not equate fallback defaults with detected capabilities.
+ *
+ * MCP, agents, permissions, plugins, and title-model settings are untouched: inline config
+ * only sets model/small_model and the jev-gateway provider entries, merging over user files.
+ * Code Mode stays enabled globally (no global codemode:false); CAD profiles use per-server
+ * `codemode: false` (see docs/opencode-v2.md). Use `jev-opencode --standalone` for an isolated
+ * gateway session; without it an already-running shared service ignores launcher env.
+ * Explicit `--server` is forwarded untouched and never silently ignored.
  */
 function opencodeInlineConfig(origin) {
   const model = opencodeModel();
@@ -97,6 +112,23 @@ function opencodeInlineConfig(origin) {
     $schema: "https://opencode.ai/config.json",
     model: `${OPENCODE_PROVIDER}/${model}`,
     small_model: `${OPENCODE_PROVIDER}/${model}`,
+    providers: {
+      [OPENCODE_PROVIDER]: {
+        name: "Jev Gateway",
+        env: ["OPENAI_API_KEY"],
+        package: "@opencode/ai/providers/openai-compatible",
+        settings: { baseURL: `${origin}/v1` },
+        models: {
+          [model]: {
+            name: `Jev Gateway (${model})`,
+            // Accurate capabilities are upstream-dependent; do not present
+            // fallback defaults as detected. Tools are available via the
+            // gateway; image input depends on the upstream provider.
+            capabilities: { tools: true, input: ["text"], output: ["text"] },
+          },
+        },
+      },
+    },
     provider: {
       [OPENCODE_PROVIDER]: {
         npm: "@ai-sdk/openai-compatible",
@@ -118,25 +150,32 @@ export const opencode = {
     "JEV_OPENCODE_UPSTREAM_BASE_URL   where OpenCode traffic goes (default https://api.openai.com/v1)\n" +
     "JEV_OPENCODE_MODEL               model selected as jev-gateway/<model> (default gpt-5)",
   // No `args`: the model default comes from the injected config below, so a user `-m provider/model`
-  // keeps its documented top priority and every other `opencode` flag forwards untouched.
-  // The two experimental flags stay off for the launched process only (environment, never a user
-  // file): the stable AI SDK provider path above is the supported one.
+  // keeps its documented top priority and every other `opencode` flag — including `--standalone`
+  // for an isolated gateway session and explicit `--server` for a remote server — forwards
+  // untouched and is never silently ignored. Obsolete v1 experimental flags are gone: Code Mode
+  // stays enabled globally; per-server `codemode: false` is the CAD mechanism (see docs).
   env: (origin) => ({
     OPENCODE_CONFIG_CONTENT: JSON.stringify(opencodeInlineConfig(origin)),
-    OPENCODE_EXPERIMENTAL_NATIVE_LLM: "false",
-    OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
   }),
   configHelp: (origin) => {
     // No OPENCODE_CONFIG_CONTENT one-liner here: single-quoting raw JSON breaks when a custom
     // model ID contains an apostrophe. The opencode.json file workflow below needs no shell
     // quoting and matches what `jev-opencode --print-config` documents.
     const config = opencodeInlineConfig(origin);
-    const manual = JSON.stringify({ model: config.model, small_model: config.small_model, provider: config.provider }, null, 2);
+    const manual = JSON.stringify(
+      { model: config.model, small_model: config.small_model, providers: config.providers, provider: config.provider },
+      null,
+      2,
+    );
     return (
       `# Keep the gateway running (jev-opencode --start), then add to opencode.json\n` +
       `# (project root or ~/.config/opencode/opencode.json):\n` +
       `${manual}\n` +
-      `# then select it with: opencode --model ${config.model}`
+      `# then select it with: opencode --model ${config.model}\n` +
+      `# Isolated gateway session (recommended when a shared service is already running):\n` +
+      `#   jev-opencode --standalone\n` +
+      `# Explicit remote server is forwarded untouched:\n` +
+      `#   jev-opencode --server http://127.0.0.1:4096`
     );
   },
 };
