@@ -60,6 +60,10 @@ describe("validateDirectArgs", () => {
     // "50" must not coerce to 50.
     expect(validateDirectArgs(schema, { count: "50" as any }).ok).toBe(false);
     expect(validateDirectArgs(schema, { count: 50 }).ok).toBe(true);
+    // Integer enum against string-typed values: no match either way.
+    const mixed = { type: "object", properties: { a: { type: "integer", enum: ["x"] } }, required: ["a"] } as any;
+    expect(validateDirectArgs(mixed, { a: "x" }).ok).toBe(false);
+    expect(validateDirectArgs(mixed, { a: 1 }).ok).toBe(false);
     // Missing required must not be filled with defaults.
     expect(validateDirectArgs(schema, {} as any).ok).toBe(false);
   });
@@ -90,6 +94,23 @@ describe("validateDirectArgs", () => {
     expect(
       validateDirectArgs({ type: "object", properties: { a: { type: "weird" } } } as any, { a: "k" }).ok,
     ).toBe(false);
+  });
+
+  it("refuses malformed optionals, defaults, and bad annotations", () => {
+    // Optional property that is not an object: nothing safe to infer.
+    expect(planTool(closedTool("t", { type: "object", properties: { a: "string" } } as any)).closedParams).toBeUndefined();
+    // `default` would silently invent a value: unsupported for direct.
+    const withDefault = { type: "object", properties: { a: { type: "string", default: "x" } }, required: ["a"] } as any;
+    expect(planTool(closedTool("t", withDefault)).closedParams).toBeUndefined();
+    expect(validateDirectArgs(withDefault, { a: "x" }).ok).toBe(false);
+    // Annotation and dialect keys must be well-formed strings when present.
+    expect(validateDirectArgs({ type: "object", description: 42 } as any, {}).ok).toBe(false);
+    expect(validateDirectArgs({ type: "object", title: null } as any, {}).ok).toBe(false);
+    expect(
+      validateDirectArgs({ type: "object", properties: { a: { type: "boolean", description: {} } } } as any, { a: true }).ok,
+    ).toBe(false);
+    // A string dialect declaration is metadata, not a constraint.
+    expect(validateDirectArgs({ type: "object", $schema: "http://json-schema.org/draft-07/schema#" } as any, {}).ok).toBe(true);
   });
 
   it("treats const/type contradictions as mismatches, not coercions", () => {
