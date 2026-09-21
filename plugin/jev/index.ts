@@ -139,16 +139,12 @@ export function toolResultText(result: unknown): TextOrOpaque {
   return { opaque: true };
 }
 
-/** Encode tool-call input as a JSON arguments string, or refuse. */
+/**
+ * Encode tool-call input as a JSON arguments string, or refuse.
+ * The SDK input is a value, not source text: strings are data and always
+ * encoded, never passed through as presumed JSON.
+ */
 function encodeArguments(input: unknown): { args: string } | { opaque: true } {
-  if (typeof input === "string") {
-    try {
-      JSON.parse(input);
-      return { args: input };
-    } catch {
-      return { args: JSON.stringify(input) };
-    }
-  }
   const json = safeJson(input ?? {});
   return json === undefined ? { opaque: true } : { args: json };
 }
@@ -186,14 +182,17 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
     : [];
   if (!Array.isArray(event.messages)) return out.length > 0 ? { messages: out } : {};
   for (const message of messages) {
-    if (!isRecord(message) || typeof message.role !== "string") continue;
+    // A message without a usable role, or with content that is neither
+    // text nor a part list, cannot be interpreted: bypass rather than
+    // silently dropping part of the conversation.
+    if (!isRecord(message) || typeof message.role !== "string") return { opaque: true };
     const role: string = message.role;
     const content = message.content;
     if (typeof content === "string") {
       out.push({ role, content });
       continue;
     }
-    if (!Array.isArray(content)) continue;
+    if (!Array.isArray(content)) return { opaque: true };
     const texts: string[] = [];
     const calls: NonNullable<ChatMessage["tool_calls"]> = [];
     // Result turns emitted for the current message, so trailing message
@@ -226,6 +225,9 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
       }
       if (part.type === "tool-call") {
         if (typeof part.id !== "string" || typeof part.name !== "string") return { opaque: true };
+        // Namespaced tools route through provider-specific handling the
+        // gateway cannot reproduce; bypass rather than strip the namespace.
+        if (typeof part.namespace === "string" && part.namespace !== "") return { opaque: true };
         const encoded = encodeArguments((part as { input?: unknown }).input);
         if (!("args" in encoded)) return { opaque: true };
         calls.push({ id: part.id, type: "function", function: { name: part.name, arguments: encoded.args } });
@@ -248,16 +250,19 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
       return { opaque: true };
     }
     if (role === "tool") {
-      // Message-level text joins this message's own result turns (keeping
-      // every word with its call association). With no results it stands
-      // alone; the gateway then attributes it as unknown, which the test
-      // pins as the documented fallback.
+      // Message-level text is attributable only when the message carries
+      // exactly one result; with several results the text could belong to
+      // any of them, so bypass rather than guess. With no results the text
+      // stands alone; the gateway then attributes it as unknown, which the
+      // test pins as the documented fallback.
       if (texts.join("").trim() !== "") {
-        if (resultTurns.length > 0) {
+        if (resultTurns.length === 1) {
           const last = resultTurns[resultTurns.length - 1] as { content?: string };
           last.content = `${last.content ?? ""}\n${texts.join("\n")}`;
-        } else {
+        } else if (resultTurns.length === 0) {
           out.push({ role, content: texts.join("\n") });
+        } else {
+          return { opaque: true };
         }
       }
       continue;
