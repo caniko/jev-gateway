@@ -38,7 +38,7 @@ const report = (name, status, reason = "") => {
   console.log(`${status} ${name}${reason ? ` (${reason})` : ""}`);
 };
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+import { sleep, waitFor } from "./readiness.mjs";
 
 function freePort(port) {
   const out = spawnSync("node", ["-e", `require("net").createServer().once("error",()=>process.exit(1)).once("listening",function(){this.close();process.exit(0)}).listen(${port},"127.0.0.1")`]);
@@ -73,16 +73,6 @@ function spawnLogged(name, cmd, cmdArgs, env, logFile) {
   child.stderr.on("data", (d) => log.push(d.toString()));
   children.push({ name, child, log });
   return { child, log };
-}
-async function waitFor(fn, timeoutMs, label) {
-  const start = Date.now();
-  for (;;) {
-    // Awaited: an async predicate returns a truthy Promise, which must not
-    // count as readiness.
-    if (await fn()) return;
-    if (Date.now() - start > timeoutMs) throw new Error(`timeout waiting for ${label}`);
-    await sleep(250);
-  }
 }
 const httpPost = (port, path, body) =>
   new Promise((resolve, reject) => {
@@ -158,9 +148,12 @@ const { bin, blocked, error } = resolveBinary();
 if (error) { fail("preflight", error); process.exit(1); }
 const ALL_CHECKS = ["binary-version","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","plugin-influence","plugin-fail-open","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
 if (blocked) {
+  // Single exit policy: record BLOCKED for every check and fall through to
+  // the strict gate below, which fails on anything but the documented
+  // version-limited exception. No early successful exit exists.
   for (const name of ALL_CHECKS) report(name, "BLOCKED", blocked);
-  process.exit(0);
 }
+if (!blocked) {
 const ver = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 30000 });
 if (!ver.stdout?.includes(VERSION)) fail("binary-version", `expected ${VERSION}, got ${JSON.stringify(ver.stdout?.trim())}`);
 else report("binary-version", "PASS", ver.stdout.trim());
@@ -596,5 +589,6 @@ function printSummary() {
   }
   console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${blockedNames.length} blocked`);
 }
+} // end if (!blocked): binary-driven scenarios require a usable binary
 printSummary();
 process.exit(failed ? 1 : 0);
