@@ -32,6 +32,20 @@ function cadTurns() {
 }
 
 describe("routing-context integrity", () => {
+  it("bounds escaped text and oversized identifiers including tiny valid budgets", () => {
+    for (const budget of [64, 100, 128, 300, 800]) {
+      const input = {
+        system: '"\\\n'.repeat(2000),
+        turns: [{ role: "tool_result", call_id: "x".repeat(2000), content: "answer" }],
+      };
+      const before = JSON.stringify(input);
+      const result = buildState(input, { maxStateChars: budget, maxMessageChars: 2000 });
+      expect(JSON.stringify(result).length).toBeLessThanOrEqual(budget);
+      expect(result.truncated_routing_context).toBe(true);
+      expect(JSON.stringify(input)).toBe(before);
+    }
+    expect(() => loadConfig({ JEV_MAX_STATE_CHARS: "1" })).toThrow(/at least 64/);
+  });
   it("preserves tool-call/result association and recent groups", () => {
     const state = buildState({ system: "", turns: cadTurns() as any }, { maxStateChars: 2000, maxMessageChars: 2000 }) as any;
     expect(state.conversation).toHaveLength(5);
