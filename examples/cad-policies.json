@@ -1,15 +1,13 @@
 {
-  "$comment": "Conservative Blender/FreeCAD profile. Inspection tools reviewed as direct-eligible; bounded ops selection-only; unrestricted Python, destructive ops, and unknown tools stay passthrough (default). OpenCode approvals remain authoritative.",
+  "$comment": "Conservative Blender profile. Listed inspection tools were reviewed as direct-eligible; bounded Blender ops are selection-only; unrestricted Python, destructive ops, and everything else (including all FreeCAD tools, whose exact identities have not been reviewed here) stay passthrough via the default. Add FreeCAD tools only as exact identities after reviewing their schemas and side effects. OpenCode approvals remain authoritative.",
   "default": "passthrough",
   "rules": [
     { "match": "blender_get_scene_info", "policy": "direct-eligible" },
     { "match": "blender_get_object_info", "policy": "direct-eligible" },
     { "match": "blender_list_blender_instances", "policy": "direct-eligible" },
     { "match": "blender_get_viewport_screenshot", "policy": "direct-eligible" },
-    { "match": "freecad_get_*", "policy": "direct-eligible" },
     { "match": "blender_validate_*", "policy": "selection-only" },
     { "match": "blender_plan_*", "policy": "selection-only" },
-    { "match": "freecad_create_*", "policy": "selection-only" },
     { "match": "blender_execute_*", "policy": "passthrough" },
     { "match": "*execute*code*", "policy": "passthrough" },
     { "match": "*delete*", "policy": "passthrough" },
