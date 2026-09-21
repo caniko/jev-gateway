@@ -119,14 +119,30 @@ try {
   const ordered = [...remaining].sort(
     (a, b) => manifest.order.indexOf(a.branch) - manifest.order.indexOf(b.branch),
   );
+  // Candidate-only identity: CI checkouts have none, and these commits never
+  // leave the temp worktree.
+  execFileSync("git", ["config", "user.name", "sync-candidate"], { cwd: candidate });
+  execFileSync("git", ["config", "user.email", "sync-candidate@localhost"], { cwd: candidate });
+  const hasMergeHead = () => {
+    try { execFileSync("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: candidate, stdio: "pipe" }); return true; }
+    catch { return false; }
+  };
   for (const p of ordered) {
     try {
       execFileSync("git", ["merge", "--no-ff", "--no-commit", p._fetched], { cwd: candidate, encoding: "utf8", stdio: "pipe" });
+      if (!hasMergeHead()) {
+        ok(`candidate already contains ${p.branch}`);
+        continue;
+      }
       execFileSync("git", ["commit", "--no-edit", "-m", `sync-candidate: merge ${p.branch}`], { cwd: candidate, encoding: "utf8", stdio: "pipe" });
       ok(`candidate merged ${p.branch}`);
     } catch (e) {
-      execFileSync("git", ["merge", "--abort"], { cwd: candidate, stdio: "pipe" });
-      bad(`PR #${p.id}: CONFLICT merging ${p.branch} onto ${upstreamHead.slice(0, 12)}`);
+      if (hasMergeHead()) {
+        try { execFileSync("git", ["merge", "--abort"], { cwd: candidate, stdio: "pipe" }); } catch {}
+        bad(`PR #${p.id}: CONFLICT merging ${p.branch} onto ${upstreamHead.slice(0, 12)}`);
+      } else {
+        bad(`PR #${p.id}: merge failed without merge state (${String(e.message).split("\n")[0].slice(0, 160)})`);
+      }
     }
   }
   if (failures) {
