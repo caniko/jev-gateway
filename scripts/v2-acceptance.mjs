@@ -77,7 +77,9 @@ function spawnLogged(name, cmd, cmdArgs, env, logFile) {
 async function waitFor(fn, timeoutMs, label) {
   const start = Date.now();
   for (;;) {
-    if (fn()) return;
+    // Awaited: an async predicate returns a truthy Promise, which must not
+    // count as readiness.
+    if (await fn()) return;
     if (Date.now() - start > timeoutMs) throw new Error(`timeout waiting for ${label}`);
     await sleep(250);
   }
@@ -421,7 +423,9 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
     const req = httpRequest({ host: "127.0.0.1", port: GW_PORT, path: "/health", method: "GET" }, (res) => resolve(res.statusCode === 200));
     req.on("error", () => resolve(false)); req.end();
   });
-  if (api) report("explicit-remote-server", "PASS", "gateway /health reachable at explicit URL");
+  // This verifies an explicit address reaches the intended service; the
+  // dead --server run above verifies OpenCode honors (not ignores) the flag.
+  if (api) report("explicit-remote-server", "PASS", "explicit gateway URL serves /health");
   else fail("explicit-remote-server", "explicit gateway URL unreachable");
 }
 {
@@ -533,5 +537,16 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   else fail("cancellation-no-retry-storm", `signal=${killed.signal} code=${killed.code} before=${before} after=${after} settled=${settled}`);
 }
 
-console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${results.filter((r) => r.status === "BLOCKED").length} blocked`);
+const blockedNames = results.filter((r) => r.status === "BLOCKED").map((r) => r.name);
+// Only documented version-limited checks may stay BLOCKED without failing
+// the gate: 2.0.12 exposes fixture MCP tools on no observable path (see
+// docs/acceptance.md). Any other BLOCKED (e.g. no usable binary) fails,
+// so a vacuous green run is impossible.
+const allowedBlocked = new Set(["mcp-invocation"]);
+const unexpectedBlocked = blockedNames.filter((n) => !allowedBlocked.has(n));
+if (unexpectedBlocked.length) {
+  console.log(`\nFAIL: unexpected BLOCKED checks: ${unexpectedBlocked.join(", ")}`);
+  process.exit(1);
+}
+console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${blockedNames.length} blocked`);
 process.exit(failed ? 1 : 0);
