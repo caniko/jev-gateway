@@ -27,7 +27,7 @@ Binary source: `--binary PATH`, `OPENCODE_V2_BIN`, or `--install-binary`
 access only). Without a usable binary every binary-driven check reports
 BLOCKED. `GATEWAY_ROOT` selects the gateway build under test.
 
-Current checks (24): installed artifact (pack digest recorded, gateway
+Current checks (28): installed artifact (pack digest recorded, gateway
 and plugin both run from the production-dependency installation), version,
 text roundtrip, native tool call/result linkage, MCP connection
 (server-log evidence that the fixture connected with 2 tools), MCP
@@ -42,11 +42,15 @@ multi-turn continuity, deny/ask safety (no execution either way), image
 bypass with 0 Jev calls, both credential directions, standalone
 isolation, existing shared service (own-config-wins, zero cross-talk on
 a separated stub), explicit remote honored, balanced pairs,
-cancellation with no post-kill retries.
+cancellation with no post-kill retries. The four permission reply cases use
+the supported v2 server API against a fresh authenticated local server:
+observe a pending MCP request, assert the counter is empty, then reply
+`once` or `reject` and check the exact final counter, in both exposure modes.
 
-The 2026-09-22 local run passed 24 checks with zero failures and zero
-blocked checks. This does not establish interactive approval/rejection,
-reload/disposal, or exactly-once application mutations under cancellation;
+The 2026-09-22 local run passed 28 checks with zero failures and zero
+blocked checks. This verifies the permission decision API, not the terminal
+approval UI. It does not establish reload/disposal or exactly-once
+application mutations under cancellation;
 those remain required production qualifications, distinct from these checks.
 
 The earlier claim that 2.0.12 cannot expose MCP tools was incorrect. The

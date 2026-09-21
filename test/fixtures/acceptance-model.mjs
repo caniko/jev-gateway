@@ -54,7 +54,7 @@ const wantsTool = (raw) => {
       const calls = messages.flatMap((m) => m.tool_calls ?? []);
       // Allow the asynchronous MCP catalog to settle during a bounded,
       // harmless first tool turn. Subsequent calls use the actual roster.
-      if (calls.length === 0) return { name: "read", args: JSON.stringify({ path: scenario.warmup }) };
+      if (calls.length === 0 && !scenario.noWarmup) return { name: "read", args: JSON.stringify({ path: scenario.warmup }) };
       if (scenario.codemode) {
         const executions = calls.filter((c) => c.function?.name === "execute");
         if (scenario.denied) {
