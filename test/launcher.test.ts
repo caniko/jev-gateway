@@ -116,6 +116,32 @@ describe("jev-opencode spec", () => {
     expect(inlineConfig().model).toBe("jev-gateway/gpt-5");
   });
 
+  it("omits model keys when JEV_OPENCODE_MODEL is empty so file config wins", () => {
+    process.env.JEV_OPENCODE_MODEL = "";
+    const config = inlineConfig();
+    expect("model" in config).toBe(false);
+    expect("small_model" in config).toBe(false);
+    // The provider entry is still offered for explicit -m selection.
+    expect(config.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
+  });
+
+  it("preserves provider options, capabilities, and title settings", () => {
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      model: "jev-gateway/gpt-5",
+      small_model: "custom/small",
+      provider: { "jev-gateway": { options: { timeout: 90000, apiKey: "{env:MY_KEY}" } } },
+      agent: { title: { model: "custom/small" } },
+      permission: { edit: "ask" },
+    });
+    const config = inlineConfig();
+    expect(config.small_model).toBe("custom/small");
+    // Explicit timeout survives; endpoint and credential default fill in.
+    expect(config.provider["jev-gateway"].options.timeout).toBe(90000);
+    expect(config.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
+    expect(config.agent.title.model).toBe("custom/small");
+    expect(config.permission).toEqual({ edit: "ask" });
+  });
+
   it("does not set obsolete v1 experimental flags; Code Mode stays enabled globally", () => {
     const env = opencode.env!(origin);
     expect(env.OPENCODE_EXPERIMENTAL_NATIVE_LLM).toBeUndefined();

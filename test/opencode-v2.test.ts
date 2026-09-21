@@ -110,41 +110,41 @@ describe("opencode v2 wire safety", () => {
     // are qualified as `ns.name` and never forced by bare name (see safety test above).
   });
 
-  it("disables direct on stored sessions but still delegates selection", async () => {
-    // store:true sessions may later chain from previous_response_id. The
-    // gateway's synthetic direct reply is explicitly unstored, so direct
-    // mode is off here while forced selection still applies.
+  it("disables direct unless the session is explicitly unstored", async () => {
+    // Stored sessions (explicitly, or by omission since the API stores by
+    // default) may later chain from previous_response_id. The gateway's
+    // synthetic direct reply is explicitly unstored, so direct mode runs
+    // only on explicit store:false while forced selection still applies.
     const canned = {
       tool: { choice: "t" },
       needs_tool: { noul: 0.95 },
       "arg:0:on": { noul: 0.99 },
     };
     const closed = { type: "function", name: "t", parameters: { type: "object", properties: { on: { type: "boolean" } }, required: ["on"] } };
-    const jev = fakeJev(canned);
-    const upstream = fakeUpstream();
-    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
-    const res = await app.request("/v1/responses", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "m",
-        input: [{ role: "user", content: "hi" }],
-        tools: [closed],
-        store: true,
-        stream: false,
-      }),
-    });
-    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
-    expect(upstream.calls).toHaveLength(1);
-    expect(upstream.calls[0]!.body.tool_choice).toEqual({ type: "function", name: "t" });
+    for (const body of [
+      { model: "m", input: [{ role: "user", content: "hi" }], tools: [closed], store: true, stream: false },
+      { model: "m", input: [{ role: "user", content: "hi" }], tools: [closed], stream: false },
+    ]) {
+      const jev = fakeJev(canned);
+      const upstream = fakeUpstream();
+      const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+      const res = await app.request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+      expect(upstream.calls).toHaveLength(1);
+      expect(upstream.calls[0]!.body.tool_choice).toEqual({ type: "function", name: "t" });
+    }
 
-    // Unstored sessions keep direct, and the synthetic reply cannot poison
-    // a later chain: store:false with previous_response_id:null.
+    // Explicitly unstored sessions keep direct, and the synthetic reply
+    // cannot poison a later chain: store:false with previous_response_id:null.
     const app2 = createApp({ config: testConfig(), askJev: fakeJev(canned).askJev, fetch: fakeUpstream().fetchImpl });
     const res2 = await app2.request("/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "m", input: [{ role: "user", content: "hi" }], tools: [closed], stream: false }),
+      body: JSON.stringify({ model: "m", input: [{ role: "user", content: "hi" }], tools: [closed], store: false, stream: false }),
     });
     expect(res2.headers.get("x-jev-gateway-mode")).toBe("direct");
     const json = (await res2.json()) as any;

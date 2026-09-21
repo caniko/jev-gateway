@@ -94,10 +94,12 @@ export interface RouterInput {
   steer?: "tool_choice" | "hint";
   /**
    * False when a synthetic direct answer would be unsafe on this transport
-   * even though selection is fine: e.g. Responses `store: true`, where the
-   * gateway's unstored direct reply (store:false, previous_response_id:null)
-   * must not masquerade as a stored upstream response a later request could
-   * chain from. Forced/hint delegation still applies.
+   * even though selection is fine: Responses sessions are stored by default
+   * (explicitly or by omission), where the gateway's unstored direct reply
+   * (store:false, previous_response_id:null) must not masquerade as a
+   * stored upstream response a later request could chain from. Only an
+   * explicit `store: false` keeps direct mode. Forced/hint delegation
+   * still applies.
    */
   allowDirect?: boolean;
 }
