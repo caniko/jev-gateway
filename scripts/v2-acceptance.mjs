@@ -390,7 +390,11 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
         return servers.data.some((s) => s.name === "fixture" && s.status.status === "connected");
       }, 30000, "MCP server startup before first prompt");
       const marker = `${codemode ? "nested" : "direct"}-${decision}`;
-      writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, marker, noWarmup: true })}`);
+      // Connected status precedes the debounced tool-registry refresh.
+      // Retain the bounded harmless first turn; this suite qualifies
+      // permission decisions, not cold first-request catalog readiness.
+      writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, marker, warmup: path })}`);
+      writeFileSync(join(project, "delayms"), "1200");
       const session = await client.session.create({
         location: { directory: project }, model: { providerID: "acc-probe", id: "acc-model" },
         permissions: [
@@ -413,6 +417,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
       const check = `mcp-${codemode ? "nested" : "direct"}-ask-${decision}`;
       if (actual === expected) report(check, "PASS", "pending request observed; no pre-approval mutation; exact post-reply counter");
       else fail(check, `counter=${JSON.stringify(actual)}`);
+      rmSync(join(project, "delayms"));
       rmSync(join(project, "toolmode"));
     }
   } catch (error) {
