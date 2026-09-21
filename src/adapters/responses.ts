@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Decision } from "../decide.js";
+import { hasResponsesMultimodal, MULTIMODAL_SKIP } from "../multimodal.js";
 import { textOf, truncate } from "../state.js";
 import type { DirectCall, JsonSchema, RouterInput, RouterTool, Turn } from "../types.js";
 import { sse, type Adapter } from "./adapter.js";
@@ -102,6 +103,7 @@ function toTools(raw: ResponsesTool[]): RouterTool[] {
 function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | { skip: string } {
   // With server-side history the router would be judging a conversation it cannot see.
   if (req.previous_response_id) return { skip: "previous_response_id" };
+  if (hasResponsesMultimodal(req.input)) return { skip: MULTIMODAL_SKIP };
   const items = inputItems(req);
   const clip = (value: unknown) => truncate(typeof value === "string" ? value : textOf(value), maxMessageChars);
 

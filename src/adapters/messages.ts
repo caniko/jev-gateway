@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Decision } from "../decide.js";
+import { hasMessagesMultimodal, MULTIMODAL_SKIP } from "../multimodal.js";
 import { textOf, truncate } from "../state.js";
 import type { DirectCall, Json, JsonSchema, RouterInput, RouterTool, Turn } from "../types.js";
 import { sse, type Adapter } from "./adapter.js";
@@ -49,6 +50,7 @@ function toTools(raw: MessagesTool[]): RouterTool[] {
 
 function toInput(req: MessagesRequest, maxMessageChars: number): RouterInput | { skip: string } {
   if (!Array.isArray(req.messages)) return { skip: "no_messages" };
+  if (hasMessagesMultimodal(req)) return { skip: MULTIMODAL_SKIP };
   const clip = (value: unknown) => truncate(textOf(value), maxMessageChars);
 
   const toolNameById = new Map<string, string>();
