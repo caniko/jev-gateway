@@ -22,16 +22,21 @@ but 2.0.12's own schema (`https://opencode.ai/config.json` at time of
 writing) uses the flat shapes, and `debug config` shows the server
 normalizing them (`permission` map → `permissions` array, `mcp.<name>` →
 `mcp.servers.<name>`, `provider.<id>.options` → `providers.<id>.settings`).
-The launcher therefore emits the flat shape the binary accepts:
+The launcher therefore emits the flat shape the binary accepts **and
+was observed to route**:
 
 - `provider.jev-gateway`: `npm: "@ai-sdk/openai-compatible"`,
   `options: { baseURL: "<origin>/v1", apiKey: "{env:OPENAI_API_KEY}" }`.
-- No `providers`/`package`/`settings` keys (unverified against this
-  binary; re-verify on upgrade before emitting them).
+- The native `providers` + `package`/`settings` shape parses (it appears
+  verbatim in `debug config`) but did **not** route in testing: requests
+  fell through to the default endpoint. Do not emit it until a version
+  is observed to honor it.
 - No capabilities/limits for the gateway model: nothing invented is
   presented as detected.
-- No `codemode` key exists on MCP servers in 2.0.12 (local servers take
-  `type`, `command[]`, `cwd`, `environment`, `enabled`, `timeout` only).
+- No `codemode` key is honored on MCP servers in 2.0.12 (the published
+  schema omits it and `debug config` silently drops it). Per-server
+  direct exposure is therefore unavailable in the observed version; see
+  Code Mode below.
 
 ## Observed wire formats
 
@@ -61,6 +66,9 @@ run inside generated `{ code }` through the `execute` tool, whose catalog
 is discovered at runtime (`search`). Jev therefore never selects inner
 MCP tools; the gateway routes only the outer `execute` selection and must
 not claim otherwise. Nested OpenCode permissions remain authoritative.
+Do not set a global Code Mode off switch either: no such supported key
+was observed, and disabling the outer tool would remove the only path
+MCP tools have.
 
 ## Launcher
 
@@ -69,8 +77,13 @@ not claim otherwise. Nested OpenCode permissions remain authoritative.
 - `model` / `small_model`: `jev-gateway/<model>` by default
   (`JEV_OPENCODE_MODEL`, default `gpt-5`).
 - When `JEV_OPENCODE_MODEL` is unset, an inherited non-gateway model is
-  preserved and only the provider entry is added; inherited MCP, agents,
-  permissions, plugins, and title settings are preserved key by key.
+  preserved and only the provider entry is added; setting
+  `JEV_OPENCODE_MODEL` to the empty string omits `model`/`small_model`
+  entirely so file-stored configuration wins. Inherited MCP, agents,
+  permissions, plugins, and title settings are preserved key by key;
+  extra provider option keys (e.g. `timeout`) survive while the endpoint
+  always points at the launched gateway and the credential defaults to
+  the documented mechanism only when absent.
   Unparseable inheritance never breaks the launch (falls back to default).
 - Explicit `opencode -m provider/model` keeps top priority (the launcher
   injects no leading args); `--standalone` and `--server` forward
@@ -89,8 +102,9 @@ silently reconfigure or terminate unrelated sessions.
 
 - `previous_response_id`, opaque references, unsupported namespaces, and
   dynamic declarations stay passthrough.
-- `store: true` disables direct mode (selection still delegates via
-  forced/hint): the synthetic direct reply is explicitly `store: false`
-  with `previous_response_id: null`, so it can never poison a later
-  server-side chain. No gateway history database is added.
+- Direct mode runs only on explicit `store: false`: sessions are stored
+  by default (explicitly or by omission), and the synthetic direct reply
+  is explicitly `store: false` with `previous_response_id: null`, so it
+  can never poison a later server-side chain. Selection still delegates
+  via forced/hint everywhere. No gateway history database is added.
 - Transports not exercised here are not claimed supported.

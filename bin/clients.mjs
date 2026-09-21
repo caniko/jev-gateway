@@ -117,28 +117,38 @@ function opencodeInlineConfig(origin) {
     typeof inherited?.model === "string" && inherited.model.startsWith(`${OPENCODE_PROVIDER}/`)
       ? inherited.model.slice(OPENCODE_PROVIDER.length + 1)
       : undefined;
-  const model = forced ?? inheritedId ?? opencodeModel();
-  const provider = {
-    ...(inherited?.provider?.[OPENCODE_PROVIDER] && typeof inherited.provider[OPENCODE_PROVIDER] === "object"
+  const model = forced || inheritedId || opencodeModel();
+  const inheritedEntry =
+    inherited?.provider?.[OPENCODE_PROVIDER] && typeof inherited.provider[OPENCODE_PROVIDER] === "object"
       ? inherited.provider[OPENCODE_PROVIDER]
-      : {}),
+      : {};
+  const inheritedOptions =
+    inheritedEntry.options && typeof inheritedEntry.options === "object" && !Array.isArray(inheritedEntry.options)
+      ? inheritedEntry.options
+      : {};
+  const provider = {
+    ...inheritedEntry,
     npm: "@ai-sdk/openai-compatible",
     name: "Jev Gateway",
-    options: { baseURL: `${origin}/v1`, apiKey: "{env:OPENAI_API_KEY}" },
+    // Extra option keys (e.g. timeout) are preserved; the endpoint always
+    // points at this gateway (otherwise routing silently breaks), and the
+    // credential defaults to the documented mechanism only when absent.
+    options: { ...inheritedOptions, baseURL: `${origin}/v1`, apiKey: inheritedOptions.apiKey ?? "{env:OPENAI_API_KEY}" },
     models: { [model]: { name: `Jev Gateway (${model})` } },
   };
-  // Preserve a configured non-gateway model unless JEV_OPENCODE_MODEL
-  // explicitly asks for gateway routing (the launcher's default purpose is
-  // routing through Jev, so an unset default still selects it).
-  const selected = forced ? `${OPENCODE_PROVIDER}/${model}` : (inherited?.model ?? `${OPENCODE_PROVIDER}/${model}`);
-  const selectedSmall = forced
+  // Model selection: an explicit JEV_OPENCODE_MODEL always wins; an empty
+  // string omits both keys so file-stored configuration wins instead; an
+  // inherited non-gateway model is preserved; otherwise the launcher
+  // default routes through Jev.
+  const omit = forced === "";
+  const selected = forced && !omit ? `${OPENCODE_PROVIDER}/${model}` : (inherited?.model ?? `${OPENCODE_PROVIDER}/${model}`);
+  const selectedSmall = forced && !omit
     ? `${OPENCODE_PROVIDER}/${model}`
     : (inherited?.small_model ?? `${OPENCODE_PROVIDER}/${model}`);
   return {
     ...(inherited ?? {}),
     $schema: "https://opencode.ai/config.json",
-    model: selected,
-    small_model: selectedSmall,
+    ...(omit ? {} : { model: selected, small_model: selectedSmall }),
     provider: { ...inherited?.provider, [OPENCODE_PROVIDER]: provider },
   };
 }
