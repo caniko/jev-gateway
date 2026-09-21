@@ -34,14 +34,14 @@ was observed to route**:
 - No capabilities/limits for the gateway model: nothing invented is
   presented as detected.
 - A minimal native `mcp.servers.<name>` entry (no optional timeout
-  fields) is accepted and normalized by 2.0.12, and the server connects
-  (`mcp connected … tools=2`). A numeric `timeout` or a `codemode` key
-  causes the entry to be silently dropped in normalized output instead.
-  The published schema's `McpLocalConfig` likewise omits `codemode` with
-  `additionalProperties: false`. Per-server direct exposure is therefore
-  unavailable in the observed version; see Code Mode below. The v2 web
-  docs describe both shapes, but they do not match the pinned binary or
-  its published schema — re-verify on upgrade before emitting either.
+  fields) is accepted and normalized by 2.0.12 — including a correctly
+  spelled `codemode: false` — and the server connects
+  (`mcp connected … tools=2`). A numeric `timeout` key causes the entry
+  to be silently dropped in normalized output instead. So the earlier
+  “unsupported” conclusion was premature: configuration is accepted, but
+  the tools still surface nowhere observable (see Code Mode below).
+  Retraction recorded 2026-09-21; the limitation below is release
+  behavior, not a config mistake.
 
 ## Observed wire formats
 
@@ -75,17 +75,18 @@ Do not set a global Code Mode off switch either: no such supported key
 was observed, and disabling the outer tool would remove the only path
 MCP tools have.
 
-Stronger, verified 2026-09-21 against the pinned binary with a valid
-native entry: a connected local MCP fixture (`mcp connected … tools=2`
-in the server log) is exposed **neither** on the provider wire (12
-native tools only), **nor** in the Code Mode catalog (`search({})`
-paginated over all 48 entries shows no fixture paths), **nor** by
-direct `tools.<server>.<tool>` invocation (`Unknown tool … Use
-search`). This is a 2.0.12 compatibility limitation, not a configuration
-mistake: the entry is accepted, the server connects, the tools simply
-never surface. Real MCP execution through 2.0.12 is therefore not
-deterministically drivable here; Blender/FreeCAD workflows stay manual
-until a version observably exposes them.
+Verified 2026-09-21 against the pinned binary with a valid native entry
+(`codemode: false` retained, server connected): a connected local MCP
+fixture (`mcp connected … tools=2` in the server log) is exposed
+**neither** on the provider wire (12 native tools only), **nor** in the
+Code Mode catalog (`search({})` paginated over all 48 entries shows no
+fixture paths), **nor** by direct `tools.<server>.<tool>` invocation
+(`Unknown tool 'fx.test_write'`), with or without explicit allow
+permissions. Minimal reproduction: native `mcp.servers.fx` local stdio
+entry with `codemode: false`, no timeout fields; run any prompt; observe
+12 wire tools and the `Unknown tool` result. Real MCP execution through
+2.0.12 is therefore not deterministically drivable here; Blender/FreeCAD
+workflows stay manual until a version observably exposes them.
 
 ## v2 plugin integration (`plugin/jev`)
 

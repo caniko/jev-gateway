@@ -121,20 +121,52 @@ describe("toChatMessages", () => {
     expect(toChatMessages({ messages: [{ role: "user", content: [{ type: "frobnicate" }] }] })).toEqual({ opaque: true });
   });
 
-  it("encodes string input safely and keeps text beside results", () => {
+  it("encodes string input as data, never as presumed JSON", () => {
     const out = toChatMessages({
       messages: [
         { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "t", input: '{"a":1}' }] },
         { role: "assistant", content: [{ type: "tool-call", id: "c2", name: "t", input: "raw" }] },
+      ],
+    });
+    // Strings are values: '{"a":1}' as data encodes with quotes, exactly
+    // like any other string, instead of smuggling in a foreign object.
+    expect(out.messages?.[0]).toMatchObject({ tool_calls: [{ function: { arguments: '"{\\"a\\":1}"' } }] });
+    expect(out.messages?.[1]).toMatchObject({ tool_calls: [{ function: { arguments: '"raw"' } }] });
+  });
+
+  it("keeps single-result text beside its result, bypasses ambiguous mixes", () => {
+    const single = toChatMessages({
+      messages: [
         { role: "tool", content: [{ type: "text", text: "note" }, { type: "tool-result", id: "c1", name: "t", result: { type: "text", value: "v" } }] },
       ],
     });
-    expect(out.messages?.[0]).toMatchObject({ tool_calls: [{ function: { arguments: '{"a":1}' } }] });
-    expect(out.messages?.[1]).toMatchObject({ tool_calls: [{ function: { arguments: '"raw"' } }] });
-    // Message-level text joins the message's own result turn, preserving
-    // the call association instead of becoming a mislabeled turn.
-    expect(out.messages?.[2]).toMatchObject({ tool_call_id: "c1", content: "v\nnote" });
-    expect(out.messages).toHaveLength(3);
+    expect(single.messages).toEqual([{ role: "tool", tool_call_id: "c1", content: "v\nnote" }]);
+    // Text beside two results could belong to either: bypass, don't guess.
+    expect(
+      toChatMessages({
+        messages: [
+          {
+            role: "tool",
+            content: [
+              { type: "text", text: "note" },
+              { type: "tool-result", id: "c1", name: "t", result: { type: "text", value: "v1" } },
+              { type: "tool-result", id: "c2", name: "t", result: { type: "text", value: "v2" } },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({ opaque: true });
+  });
+
+  it("bypasses namespaced calls and malformed messages instead of dropping them", () => {
+    expect(
+      toChatMessages({
+        messages: [{ role: "assistant", content: [{ type: "tool-call", id: "c1", name: "t", namespace: "mcp", input: {} }] }],
+      }),
+    ).toEqual({ opaque: true });
+    expect(toChatMessages({ messages: [{ content: "no role" }] })).toEqual({ opaque: true });
+    expect(toChatMessages({ messages: [{ role: "user", content: 42 }] })).toEqual({ opaque: true });
+    expect(toChatMessages({ messages: [null] })).toEqual({ opaque: true });
   });
 
   it("returns empty when nothing routable was said", () => {
@@ -210,6 +242,35 @@ describe("applyJevHint conversation", () => {
     badModel.model = { providerID: "", id: "m" };
     expect((await applyJevHint(badModel, config, fetch)).reason).toBe("malformed_model");
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("never sends screenshot-bearing history: zero fetches at the boundary", async () => {
+    const fetch = decideWith({ mode: "forced", tool: "read", confidence: 0.99 });
+    const system: Array<{ type: "text"; text?: string }> = [];
+    const event: HintEvent = {
+      tools: { read: { description: "r", input: {} } },
+      model,
+      system,
+      messages: [
+        { role: "user", content: "look at this" },
+        { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "shot", input: {} }] },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              id: "c1",
+              name: "shot",
+              result: { type: "content", value: [{ type: "text", text: "screenshot" }, { type: "file", uri: "f", mime: "i/png" }] },
+            },
+          ],
+        },
+        { role: "user", content: "what do you see" },
+      ],
+    };
+    expect((await applyJevHint(event, config, fetch)).reason).toBe("multimodal");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(system).toHaveLength(0);
   });
 
   it("fails open on gateway errors", async () => {
