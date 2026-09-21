@@ -120,6 +120,51 @@ describe("conservative multimodal passthrough", () => {
     }
   });
 
+  it("bypasses nested blobs and opaque references without failing", async () => {
+    // Gemini functionResponse carrying a nested screenshot part.
+    {
+      const jev = fakeJev({});
+      const upstream = fakeUpstream();
+      const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+      const body = {
+        contents: [
+          {
+            role: "user",
+            parts: [{ functionResponse: { name: "shot", response: { ok: true }, parts: [{ inlineData: { mimeType: "image/png", data: "AAA" } }] } }],
+          },
+        ],
+        tools: [{ functionDeclarations: [{ name: "t", parameters: { type: "object", properties: {} } }] }],
+      };
+      const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(res.headers.get("x-jev-gateway-reason")).toBe(MULTIMODAL_SKIP);
+      expect(jev.requests).toHaveLength(0);
+      expect(upstream.calls[0]!.body).toEqual(body);
+    }
+    // Responses opaque item reference (server-side content Jev cannot see).
+    {
+      const jev = fakeJev({});
+      const upstream = fakeUpstream();
+      const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+      const body = {
+        model: "m",
+        input: [{ type: "item_reference", id: "msg_1" }],
+        tools: [{ type: "function", name: "t", parameters: { type: "object", properties: {} } }],
+      };
+      const res = await app.request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(res.headers.get("x-jev-gateway-reason")).toBe(MULTIMODAL_SKIP);
+      expect(jev.requests).toHaveLength(0);
+      expect(upstream.calls[0]!.body).toEqual(body);
+    }
+  });
+
   it("bypasses opaque file references and malformed content without failing", async () => {
     const { app, jev } = chatApp();
     const fileRef = await app.request("/v1/chat/completions", {

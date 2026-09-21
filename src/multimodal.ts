@@ -34,8 +34,12 @@ export function hasChatMultimodal(messages: unknown): boolean {
   return false;
 }
 
-// Responses: input is string | items[]. Items may carry input_text,
-// input_image, file refs, or nested tool-result images.
+// Responses: input is string | items[]. Only explicitly text-shaped items
+// are Jev-readable; every other typed item (images, files, audio,
+// item_reference and any future opaque kind) bypasses.
+const RESPONSES_TEXT_ITEM = new Set(["message", "additional_tools", "reasoning"]);
+const RESPONSES_CALL_ITEM = new Set(["function_call", "custom_tool_call", "local_shell_call"]);
+
 export function hasResponsesMultimodal(input: unknown): boolean {
   if (input == null || typeof input === "string") return false;
   if (!Array.isArray(input)) return false;
@@ -43,11 +47,11 @@ export function hasResponsesMultimodal(input: unknown): boolean {
     if (!isRecord(item)) continue;
     const t = (item as any).type as string | undefined;
     if (typeof t === "string") {
-      if (t === "input_image" || t === "output_image") return true;
-      if (t.includes("image") || t.includes("audio") || t.includes("video") || t.includes("file") || t.includes("document"))
-        return true;
-      if (t === "additional_tools") continue;
-      if (t.endsWith("_call_output")) {
+      if (RESPONSES_TEXT_ITEM.has(t)) {
+        // message items carry their payload in content (checked below).
+      } else if (RESPONSES_CALL_ITEM.has(t)) {
+        continue;
+      } else if (t.endsWith("_call_output")) {
         const out = (item as any).output;
         if (typeof out === "string") continue;
         // Structured output may embed screenshots: be conservative.
@@ -59,6 +63,10 @@ export function hasResponsesMultimodal(input: unknown): boolean {
           }
         } else if (isRecord(out)) return true;
         continue;
+      } else {
+        // input_image, item_reference, hosted traces, and any unknown
+        // item kind: Jev cannot see the referenced content.
+        return true;
       }
     }
     const content = (item as any).content;
@@ -116,8 +124,17 @@ export function hasMessagesMultimodal(req: { system?: unknown; messages?: unknow
   return false;
 }
 
+// Blob keys that are never text, at any nesting depth inside a part.
+const GEMINI_BLOB_KEYS = new Set(["inlineData", "inline_data", "fileData", "file_data", "media", "blob"]);
+
+function hasBlobKey(v: unknown): boolean {
+  if (Array.isArray(v)) return v.some(hasBlobKey);
+  if (isRecord(v)) return Object.entries(v).some(([k, val]) => GEMINI_BLOB_KEYS.has(k) || hasBlobKey(val));
+  return false;
+}
+
 // Gemini: parts are text | functionCall | functionResponse. Anything else
-// (inlineData/fileData/media) is opaque. Never downloads URLs.
+// (inlineData/fileData/media, at any depth) is opaque. Never downloads URLs.
 export function hasGeminiMultimodal(contents: unknown): boolean {
   if (!Array.isArray(contents)) return false;
   for (const c of contents) {
@@ -127,21 +144,20 @@ export function hasGeminiMultimodal(contents: unknown): boolean {
     if (!Array.isArray(parts)) return true;
     for (const p of parts) {
       if (!isRecord(p)) return true;
+      if (hasBlobKey(p)) return true;
       if (typeof (p as any).text === "string" && Object.keys(p).length === 1) continue;
-      if ((p as any).functionCall && Object.keys(p).every((k) => k === "functionCall" || k === "text")) continue;
-      if ((p as any).functionResponse) {
-        // functionResponse.response should be JSON; embedded blobs are opaque.
-        const r = (p as any).functionResponse.response;
-        if (r != null && typeof r !== "object") return true;
-        if (isRecord(r)) {
-          const s = JSON.stringify(r);
-          if (s.includes("inlineData") || s.includes("fileData") || s.includes("base64")) return true;
-        }
+      if (Object.keys(p).length === 1 && isRecord((p as any).functionCall)) continue;
+      if (Object.keys(p).length === 1 && isRecord((p as any).functionResponse)) {
+        // functionResponse.response should be a JSON object; anything else
+        // (including extra sibling keys) is opaque.
+        const fr = (p as any).functionResponse;
+        if (Object.keys(fr).some((k) => k !== "name" && k !== "response" && k !== "id")) return true;
+        const r = fr.response;
+        if (r != null && !isRecord(r)) return true;
         continue;
       }
-      // Unknown part shape (inlineData, fileData, etc.).
-      if ("inlineData" in p || "inline_data" in p || "fileData" in p || "file_data" in p || "media" in p) return true;
-      if (!("text" in p) && !("functionCall" in p) && !("functionResponse" in p)) return true;
+      // Mixed or unknown part shape.
+      return true;
     }
   }
   return false;
