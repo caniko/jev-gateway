@@ -140,7 +140,7 @@ describe("toChatMessages", () => {
         { role: "tool", content: [{ type: "text", text: "note" }, { type: "tool-result", id: "c1", name: "t", result: { type: "text", value: "v" } }] },
       ],
     });
-    expect(single.messages).toEqual([{ role: "tool", tool_call_id: "c1", content: "v\nnote" }]);
+    expect(single).toEqual({ opaque: true });
     // Text beside two results could belong to either: bypass, don't guess.
     expect(
       toChatMessages({
@@ -172,6 +172,18 @@ describe("toChatMessages", () => {
   it("returns empty when nothing routable was said", () => {
     expect(toChatMessages({ messages: [] })).toEqual({});
     expect(toChatMessages({})).toEqual({});
+  });
+
+  it("refuses invalid roles, provider execution, unassociated results, and malformed containers", () => {
+    const call = { type: "tool-call", id: "c", name: "read", input: {} };
+    for (const message of [
+      { role: "user", content: [call] },
+      { role: "assistant", content: [{ ...call, providerExecuted: true }] },
+      { role: "tool", content: "unassociated text" },
+      { role: "alien", content: "hello" },
+      { role: "tool", content: [{ type: "tool-result", id: "c", namespace: "remote", result: { type: "text", value: "x" } }] },
+    ]) expect(toChatMessages({ messages: [message] })).toEqual({ opaque: true });
+    expect(toChatMessages({ messages: {} })).toEqual({ opaque: true });
   });
 });
 
