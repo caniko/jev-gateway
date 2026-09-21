@@ -48,6 +48,29 @@ const wantsTool = (raw) => {
   try {
     const j = JSON.parse(raw);
     if (!j.tools || !j.tools.length) return undefined;
+    if (spec.name === "@mcp") {
+      const scenario = JSON.parse(spec.args);
+      const messages = j.messages ?? [];
+      const calls = messages.flatMap((m) => m.tool_calls ?? []);
+      // Allow the asynchronous MCP catalog to settle during a bounded,
+      // harmless first tool turn. Subsequent calls use the actual roster.
+      if (calls.length === 0) return { name: "read", args: JSON.stringify({ path: scenario.warmup }) };
+      if (scenario.codemode) {
+        const executions = calls.filter((c) => c.function?.name === "execute");
+        if (scenario.denied) {
+          if (executions.length) return undefined;
+          return { name: "execute", args: JSON.stringify({ code: `return await tools.fixture.test_write(${JSON.stringify({ line: scenario.marker })})` }) };
+        }
+        if (executions.length === 0) return { name: "execute", args: JSON.stringify({ code: 'return await search({query:"test_write"})' }) };
+        if (executions.length > 1) return undefined;
+        const discovery = messages.find((m) => m.role === "tool" && m.tool_call_id === executions[0].id);
+        if (!JSON.stringify(discovery?.content).includes("tools.fixture.test_write")) return undefined;
+        return { name: "execute", args: JSON.stringify({ code: `return await tools.fixture.test_write(${JSON.stringify({ line: scenario.marker })})` }) };
+      }
+      if (calls.some((c) => c.function?.name === "fixture_test_write")) return undefined;
+      if (!scenario.denied && !j.tools.some((t) => (t.function?.name ?? t.name) === "fixture_test_write")) return undefined;
+      return { name: "fixture_test_write", args: JSON.stringify({ line: scenario.marker }) };
+    }
     if ((j.input || []).some((it) => typeof it?.type === "string" && it.type.endsWith("_call_output"))) return undefined;
     if ((j.messages || []).some((m) => m.role === "tool")) return undefined;
     return spec;

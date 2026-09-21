@@ -13,8 +13,8 @@ All loopback, no keys, no desktop. Topology:
   Completions JSON + Responses SSE, optional per-request delay file) and
   local MCP stdio fixture (`test/fixtures/acceptance-mcp.mjs`,
   `test_read` pure / `test_write` appends to a counter file).
-- Gateway-in-loop scenarios use the built `dist/` of a checkout given by
-  `GATEWAY_ROOT` (default: this repo), with upstream at the stub and Jev
+- Gateway-in-loop scenarios pack the checkout given by `GATEWAY_ROOT`,
+  install the tarball, and execute its installed gateway and plugin, with upstream at the stub and Jev
   at `scripts/mock-jev.mjs` (or `test/fixtures/acceptance-jev-auth.mjs`
   for the credential assertion).
 - Fully isolated identity: fresh `HOME` plus `XDG_CONFIG_HOME`,
@@ -27,14 +27,14 @@ Binary source: `--binary PATH`, `OPENCODE_V2_BIN`, or `--install-binary`
 access only). Without a usable binary every binary-driven check reports
 BLOCKED. `GATEWAY_ROOT` selects the gateway build under test.
 
-Current checks (21): installed artifact (pack digest recorded, gateway
-and plugin both run from the dependency-free installation), version,
+Current checks (24): installed artifact (pack digest recorded, gateway
+and plugin both run from the production-dependency installation), version,
 text roundtrip, native tool call/result linkage, MCP connection
 (server-log evidence that the fixture connected with 2 tools), MCP
-invocation (BLOCKED, see below), selection through the real binary +
+invocation and denial in direct and Code Mode configurations, selection through the real binary +
 gateway (forced `tool_choice`), plugin influence (the configured
 plugin's `[jev-routing]` hint reaches model traffic and the session
-completes — proving load plus exactly-once hook behavior), plugin
+completes — proving plugin load and request annotation), plugin
 fail-open (dead gateway leaves the run untouched with no hint),
 plugin-only influence (provider straight to stub, so hints plus a Jev
 consultation prove the plugin path with the proxy structurally absent),
@@ -44,21 +44,19 @@ isolation, existing shared service (own-config-wins, zero cross-talk on
 a separated stub), explicit remote honored, balanced pairs,
 cancellation with no post-kill retries.
 
-Last full run 2026-09-21: 15 passed / 1 failed / 1 blocked; the three
-failures traced to harness bugs (stale gateway config, SIGINT exit-code
-shape, cross-talk measured on a shared stub), all fixed since — the next
-full run re-verifies all 17 checks.
+The 2026-09-22 local run passed 24 checks with zero failures and zero
+blocked checks. This does not establish interactive approval/rejection,
+reload/disposal, or exactly-once application mutations under cancellation;
+those remain required production qualifications, distinct from these checks.
 
-Limits established by probing 2.0.12 with a valid native entry
-(`codemode: false` retained, server connects with 2 tools): fixture
-tools appear neither on the provider wire nor in the Code Mode
-catalog/search nor by direct invocation (`Unknown tool`), with or
-without allow permissions — so no deterministic MCP-invocation driver
-exists here (`mcp-invocation` stays BLOCKED); direct mode is unreachable
-through the binary because the native roster has no closed schemas
-(covered at gateway unit level instead); nested Code Mode approvals are
-unobservable for the same reason. Observed 2.0.12 facts this relies on
-live in `docs/opencode-v2.md` on the v2 branch.
+The earlier claim that 2.0.12 cannot expose MCP tools was incorrect. The
+instant-response fixture raced startup and catalog reconciliation. The
+current fixture keeps the session alive through a harmless initial read,
+with bounded response latency, then uses the actual exposed catalog.
+`codemode:false` exposes `fixture_test_write`; Code Mode discovery returns
+`tools.fixture.test_write`. Both execute a unique counter mutation exactly
+once. Adversarial calls under deny must leave that counter empty. No
+BLOCKED result is exempt from the deterministic acceptance gate.
 
 ## B. Real application (gated, disposable)
 
