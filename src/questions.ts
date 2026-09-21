@@ -136,7 +136,13 @@ export function buildQuestions(
         "Does the assistant need to call one of its tools now, rather than reply to the user in plain text?",
     },
   };
-  if (!options.withArgs) return { questions, plans };
+  if (!options.withArgs) {
+    // Absolute: when argument questions are disabled, no plan may retain
+    // closed-set arguments. Otherwise empty/const-only tools would still
+    // resolve to `direct` in decide() without any arg questions asked.
+    for (const plan of plans) delete plan.closedParams;
+    return { questions, plans };
+  }
 
   let argQuestions = 0;
   plans.forEach((plan, toolIndex) => {
