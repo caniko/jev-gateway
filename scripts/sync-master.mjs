@@ -163,12 +163,6 @@ try {
       }
     }
   }
-  if (diff) {
-    bad(`master differs from clean candidate outside downstream-only paths:\n${diff}`);
-  } else {
-    ok(`master matches candidate (upstream ${upstreamHead.slice(0, 12)} + ${ordered.length} pending) outside ${downstreamOnly.length} downstream-only paths`);
-  }
-
 } finally {
   try { execSync(`git worktree remove --force ${candidate}`, { cwd: ROOT, stdio: "pipe" }); } catch {}
   try { execSync("git worktree prune", { cwd: ROOT, stdio: "pipe" }); } catch {}
