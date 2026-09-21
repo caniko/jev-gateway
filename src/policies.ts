@@ -31,8 +31,9 @@ function moreRestrictive(a: ToolPolicy, b: ToolPolicy): ToolPolicy {
 
 function isValidPattern(pattern: string): boolean {
   if (!pattern || pattern.length > 128) return false;
-  // Documented simple patterns: exact names plus `*` wildcards (whole-value).
-  if (!/^[\p{L}\p{N}_.:/-][\p{L}\p{N}_.:/\-*?]*$/u.test(pattern)) return false;
+  // Documented simple patterns: exact names plus `*`/`?` wildcards
+  // (whole-value, matched case-insensitively after normalization).
+  if (!/^[\p{L}\p{N}_.:/\-*?]+$/u.test(pattern)) return false;
   return true;
 }
 
@@ -49,17 +50,28 @@ function patternToRegExp(pattern: string): RegExp {
   return new RegExp(`^${esc}$`);
 }
 
+const hasOwn = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
+
 export function parsePolicyConfig(raw: unknown): PolicyConfig {
   if (raw === undefined || raw === null || raw === "") return { default: "direct-eligible", rules: [] };
-  const obj = typeof raw === "string" ? JSON.parse(raw) : raw;
+  const obj: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
   if (typeof obj !== "object" || obj === null || Array.isArray(obj)) throw new Error("tool policies must be an object");
-  const def = (obj as any).default ?? "direct-eligible";
+  // Unknown fields are rejected: a typo like {defualt: ...} must throw,
+  // never silently fall back to the permissive default.
+  for (const k of Object.keys(obj)) {
+    if (k !== "default" && k !== "rules" && k !== "$comment")
+      throw new Error(`unknown tool policy field: ${k}`);
+  }
+  const def = hasOwn(obj, "default") ? (obj as any).default : "direct-eligible";
   if (def !== "passthrough" && def !== "selection-only" && def !== "direct-eligible")
     throw new Error(`invalid default policy: ${def}`);
-  const rulesRaw = (obj as any).rules ?? [];
+  const rulesRaw = hasOwn(obj, "rules") ? (obj as any).rules : [];
   if (!Array.isArray(rulesRaw)) throw new Error("tool policy rules must be an array");
   const rules: PolicyRule[] = rulesRaw.map((r: any, i: number) => {
-    if (typeof r !== "object" || r === null) throw new Error(`policy rule ${i} must be an object`);
+    if (typeof r !== "object" || r === null || Array.isArray(r)) throw new Error(`policy rule ${i} must be an object`);
+    for (const k of Object.keys(r)) {
+      if (k !== "match" && k !== "policy") throw new Error(`unknown policy rule field: ${k}`);
+    }
     if (typeof r.match !== "string" || !isValidPattern(r.match)) throw new Error(`invalid policy match: ${r.match}`);
     if (r.policy !== "passthrough" && r.policy !== "selection-only" && r.policy !== "direct-eligible")
       throw new Error(`invalid policy: ${r.policy}`);
@@ -72,9 +84,13 @@ export function parsePolicyConfig(raw: unknown): PolicyConfig {
  * Resolve policy for a tool name.
  * Precedence: exact normalized match > pattern (longer pattern wins) >
  * default. Same-specificity conflicts resolve to the most restrictive.
+ * When `roster` is given and two distinct roster names share a normalized
+ * form with the selected tool, the identity is ambiguous and resolves to
+ * passthrough regardless of rules.
  */
-export function policyFor(toolName: string, config: PolicyConfig): ToolPolicy {
+export function policyFor(toolName: string, config: PolicyConfig, roster: string[] = []): ToolPolicy {
   const norm = normalizeToolName(toolName);
+  if (roster.some((other) => other !== toolName && normalizeToolName(other) === norm)) return "passthrough";
   // Exact normalized matches first.
   const exact = config.rules.filter((r) => !r.match.includes("*") && !r.match.includes("?") && normalizeToolName(r.match) === norm);
   if (exact.length) {
