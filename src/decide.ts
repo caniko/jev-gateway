@@ -14,6 +14,7 @@ import {
   TOOL_KEY,
   type ToolPlan,
 } from "./questions.js";
+import { validateDirectArgs } from "./schema.js";
 import { buildState } from "./state.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
 
@@ -194,8 +195,11 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // a synthetic direct response — even empty or const-only plans that need
   // no argument questions. A confident selection delegates argument
   // generation upstream via forced/hint instead of skipping the main model.
+  // Schema-sound gate: even a confident closed-set resolution must validate
+  // against the complete schema. Unsupported/mismatched schemas delegate to
+  // the main model (forced/hint), never direct and never a rejection.
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (resolved && config.directCalls) {
+  if (resolved && config.directCalls && validateDirectArgs(tool.parameters, resolved.args).ok) {
     return {
       mode: "direct",
       tool: plan.name,
