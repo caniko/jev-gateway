@@ -25,10 +25,12 @@
 // - --self-test builds throwaway fixture repos exercising squash landing,
 //   descendant retention, stale heads, conflicts, and repeat runs.
 //
-// Candidate commits use the ambient operator identity with no overrides (a
+// Candidate commits use the ambient git identity with no overrides (a
 // worktree `git config` would land in the shared repository config, and -c
 // identity overrides trip the identity hooks). They are unreachable temp
-// objects, never pushed.
+// objects, never pushed. CI provides its own identity (see
+// .github/workflows/integration.yml); without any resolvable identity the
+// candidate step fails with git's "Committer identity unknown".
 //
 // Usage: node scripts/sync-master.mjs --check [--manifest PATH]
 //        node scripts/sync-master.mjs --sync [--manifest PATH]

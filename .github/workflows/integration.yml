@@ -34,6 +34,11 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: npm pack --dry-run
+      # Candidate merges need *some* resolvable identity; the standard
+      # ephemeral runner identity keeps operator config untouched.
+      - run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - run: node scripts/sync-master.mjs --check
         env:
           # gh needs an explicit token in Actions; read-only PR metadata.
