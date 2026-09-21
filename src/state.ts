@@ -27,8 +27,8 @@ export function textOf(content: unknown): string {
 export function validateLimits(limits: Limits): void {
   for (const key of ["maxStateChars", "maxMessageChars"] as const) {
     const value = limits[key];
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
-      throw new Error(`${key} must be a positive finite number, got "${String(value)}"`);
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
+      throw new Error(`${key} must be a positive integer, got "${String(value)}"`);
   }
 }
 
@@ -40,28 +40,55 @@ function isAssistantCalls(turn: Turn): boolean {
   return Array.isArray((turn as any).tool_calls);
 }
 
+const TRUNCATED_MARKER = "[truncated]";
+
+function callsOf(turn: Turn): Array<{ tool?: unknown; arguments?: unknown; call_id?: unknown }> {
+  return isAssistantCalls(turn) ? ((turn as any).tool_calls as Array<Record<string, unknown>>) : [];
+}
+
+/** Truncation markers inside tool calls/results mean chopped structured evidence. */
+function hasTruncatedStructured(turns: Turn[]): boolean {
+  return turns.some((t) => {
+    if (isToolResult(t) && typeof (t as any).content === "string" && (t as any).content.includes(TRUNCATED_MARKER))
+      return true;
+    return callsOf(t).some(
+      (c) => typeof c.arguments === "string" && (c.arguments as string).includes(TRUNCATED_MARKER),
+    );
+  });
+}
+
 /**
  * Jev state: the content the questions are asked about.
- * Preserves tool-call/result association and complete recent interaction
- * groups (assistant calls + following results are atomic). Truncation and
- * omission are explicit. Never infers IDs or promotes tool text to system.
+ *
+ * - Keeps a contiguous suffix of complete interaction groups: each
+ *   assistant tool_calls turn plus its following tool_result turns is
+ *   atomic, so a kept result always keeps its call. Once a group stops
+ *   fitting, everything older is omitted (never a hole in the middle).
+ * - The total serialized state, including envelope keys and omission
+ *   metadata, stays within maxStateChars. An oversized newest group is
+ *   deep-cloned and truncated to fit, marked explicit.
+ * - Never infers identifiers and never promotes tool text to system
+ *   instructions. Only Jev input is shaped here; the upstream request is
+ *   untouched.
  */
 export function buildState(input: Pick<RouterInput, "system" | "turns">, limits: Limits): { [key: string]: Json } {
   validateLimits(limits);
   const systemText = truncate(input.system, limits.maxMessageChars);
-  let budget = limits.maxStateChars - systemText.length;
 
-  // Group from the front: each assistant tool_calls turn plus its following
-  // tool_result turns is one atomic group; other turns are singletons.
-  // Built newest-first so omission never keeps a result without its call.
+  // Envelope overhead: the conversation key plus margin for omission
+  // metadata. Kept small deliberately; the final enforcement loop below
+  // drops oldest whole groups if the serialized total still exceeds the
+  // budget, so turn selection stays close to historical behavior.
+  const overhead = JSON.stringify({ conversation: [] }).length + 32;
+  let budget = limits.maxStateChars - systemText.length - overhead;
+
   type Group = { turns: Turn[]; size: number };
   const groups: Group[] = [];
   {
     let cur: Turn[] = [];
     const flush = () => {
       if (cur.length) {
-        const size = cur.reduce((s, t) => s + JSON.stringify(t).length, 0);
-        groups.push({ turns: cur, size });
+        groups.push({ turns: cur, size: cur.reduce((s, t) => s + JSON.stringify(t).length, 0) });
         cur = [];
       }
     };
@@ -80,79 +107,87 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
     flush();
   }
 
-  const conversation: Turn[] = [];
-  let omitted = 0;
+  // Newest-first selection; the first group that stops fitting ends
+  // selection so the kept suffix stays contiguous.
+  const kept: Group[] = [];
   let truncatedNewest = false;
   for (let gi = groups.length - 1; gi >= 0; gi--) {
     const g = groups[gi]!;
-    if (budget - g.size < 0 && conversation.length > 0) {
-      omitted += g.turns.length;
+    if (g.size <= budget) {
+      kept.unshift(g);
+      budget -= g.size;
       continue;
     }
-    if (budget - g.size < 0) {
-      // Oversized newest group: bound it by truncating text fields to fit,
-      // marking explicit truncation. Structured tool results that no longer
-      // fit safely are left marked truncated so decide() can bypass.
-      const fitted: Turn[] = [];
-      let b = budget;
-      for (let ti = g.turns.length - 1; ti >= 0; ti--) {
-        const t = { ...(g.turns[ti] as object) } as Turn;
-        const s = JSON.stringify(t);
-        if (s.length <= b || fitted.length === 0) {
-          if (s.length > b) {
-            for (const k of ["text", "content", "arguments"] as const) {
-              const v = (t as any)[k];
-              if (typeof v === "string" && v.length > 0) {
-                const allow = Math.max(0, b - 100);
-                (t as any)[k] = truncate(v, Math.min(v.length, allow));
-                truncatedNewest = true;
-              }
-            }
-            // Nested tool_calls arguments.
-            const calls = (t as any).tool_calls;
-            if (Array.isArray(calls)) {
-              for (const c of calls) {
-                if (c && typeof (c as any).arguments === "string") {
-                  (c as any).arguments = truncate((c as any).arguments, Math.max(0, b - 100));
-                  truncatedNewest = true;
-                }
-              }
-            }
-          }
-          fitted.unshift(t);
-          b -= JSON.stringify(t).length;
-        } else {
-          omitted += 1;
-        }
+    if (kept.length > 0) break;
+    // Only the newest group may be fitted, and it stays whole: deep-clone
+    // (never mutate the caller's turns) and shrink its text fields
+    // proportionally so call/result association survives. Marked explicit.
+    const clones = g.turns.map((t) => structuredClone(t) as Turn);
+    const fields: Array<{ o: Record<string, unknown>; k: string }> = [];
+    for (const t of clones) {
+      for (const k of ["text", "content"] as const) {
+        if (typeof (t as any)[k] === "string") fields.push({ o: t as unknown as Record<string, unknown>, k });
       }
-      conversation.unshift(...fitted);
-      budget = b;
-      break;
+      for (const c of callsOf(t)) {
+        if (typeof c.arguments === "string") fields.push({ o: c as unknown as Record<string, unknown>, k: "arguments" });
+      }
     }
-    conversation.unshift(...g.turns);
-    budget -= g.size;
+    const fieldLen = fields.reduce((s, f) => s + ((f.o[f.k] as string) || "").length, 0);
+    const fixed = JSON.stringify(clones).length - fieldLen;
+    const available = budget - fixed;
+    if (available < fieldLen) {
+      for (const f of fields) {
+        const v = f.o[f.k] as string;
+        f.o[f.k] = truncate(v, Math.max(0, Math.floor((v.length * available) / Math.max(1, fieldLen))));
+      }
+      truncatedNewest = true;
+    }
+    kept.unshift({ turns: clones, size: 0 });
+    break;
   }
-  // Any turns not covered (should not happen) count as omitted.
-  omitted += input.turns.length - conversation.length - omitted > 0 ? input.turns.length - conversation.length - omitted : 0;
 
-  const newestHasTruncatedToolResult = conversation.some(
-    (t) => isToolResult(t) && typeof (t as any).content === "string" && (t as any).content.includes("[truncated]"),
-  );
-  return {
+  // Final enforcement: the serialized state, envelope included, fits the
+  // budget by dropping oldest whole groups (association-safe). A single
+  // remaining turn is minimal by construction.
+  while (kept.length > 1) {
+    const probe: { [key: string]: Json } = {
+      ...(systemText ? { assistant_instructions: systemText } : {}),
+      earlier_turns_omitted: input.turns.length - kept.flatMap((g) => g.turns).length,
+      ...(truncatedNewest ? { truncated_routing_context: true } : {}),
+      conversation: kept.flatMap((g) => g.turns),
+    };
+    if (JSON.stringify(probe).length <= limits.maxStateChars) break;
+    kept.shift();
+  }
+
+  const conversation = kept.flatMap((g) => g.turns);
+  const omitted = input.turns.length - conversation.length;
+  const result: { [key: string]: Json } = {
     ...(systemText ? { assistant_instructions: systemText } : {}),
     ...(omitted ? { earlier_turns_omitted: omitted } : {}),
-    ...(truncatedNewest || newestHasTruncatedToolResult ? { truncated_routing_context: true } : {}),
+    ...(truncatedNewest || hasTruncatedStructured(conversation) ? { truncated_routing_context: true } : {}),
     conversation,
   };
+  return result;
+}
+
+/** Call/result association check over kept turns, by preserved call IDs. */
+export function danglingResult(conversation: Turn[]): boolean {
+  const ids = new Set<string>();
+  for (const t of conversation) {
+    for (const c of callsOf(t)) if (typeof c.call_id === "string") ids.add(c.call_id);
+  }
+  return conversation.some((t) => isToolResult(t) && typeof (t as any).call_id === "string" && !ids.has((t as any).call_id));
 }
 
 /**
  * When routing-relevant structured results cannot be preserved safely,
- * bypass rather than presenting chopped JSON/IDs as complete evidence.
- * Conservative: only the newest interaction group can trigger this; ordinary
- * text omission still routes.
+ * bypass rather than presenting chopped JSON/IDs or disconnected results
+ * as complete evidence. Ordinary text omission still routes.
  */
 export function incompleteRoutingContext(state: { [key: string]: Json }): string | undefined {
   if (state.truncated_routing_context) return "incomplete_routing_context";
+  const conversation = Array.isArray(state.conversation) ? (state.conversation as Turn[]) : [];
+  if (danglingResult(conversation)) return "incomplete_routing_context";
   return undefined;
 }

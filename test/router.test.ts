@@ -53,13 +53,15 @@ describe("chatAdapter.toInput + buildState", () => {
       },
       100,
     ) as RouterInput;
-    const state = buildState(input, { maxStateChars: 200, maxMessageChars: 100 });
+    const state = buildState(input, { maxStateChars: 300, maxMessageChars: 100 });
     expect(state.assistant_instructions).toBe("Be brief.");
     expect(state.earlier_turns_omitted).toBe(1);
     expect(state.conversation).toEqual([
-      { role: "assistant", tool_calls: [{ tool: "get_weather", arguments: "{}" }] },
-      { role: "tool_result", tool: "get_weather", content: "sunny" },
+      { role: "assistant", tool_calls: [{ tool: "get_weather", arguments: "{}", call_id: "c1" }] },
+      { role: "tool_result", tool: "get_weather", content: "sunny", call_id: "c1" },
     ]);
+    // The envelope included, the serialized state fits its budget.
+    expect(JSON.stringify(state).length).toBeLessThanOrEqual(300);
   });
 });
 

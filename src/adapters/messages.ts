@@ -71,7 +71,13 @@ function toInput(req: MessagesRequest, maxMessageChars: number): RouterInput | {
         if (block.id && block.name) toolNameById.set(block.id, block.name);
         turns.push({
           role: "assistant",
-          tool_calls: [{ tool: block.name ?? "unknown", arguments: clip(JSON.stringify(block.input ?? {})) }],
+          tool_calls: [
+            {
+              tool: block.name ?? "unknown",
+              arguments: clip(JSON.stringify(block.input ?? {})),
+              ...(block.id ? { call_id: block.id } : {}),
+            },
+          ],
         });
       } else if (block.type === "tool_result" || block.type.endsWith("_tool_result")) {
         flushText();
@@ -79,6 +85,7 @@ function toInput(req: MessagesRequest, maxMessageChars: number): RouterInput | {
           role: "tool_result",
           tool: toolNameById.get(block.tool_use_id ?? "") ?? "unknown",
           content: clip(block.content),
+          ...(block.tool_use_id ? { call_id: block.tool_use_id } : {}),
         });
       } else if (block.type !== "thinking" && block.type !== "redacted_thinking") {
         text.push(block);

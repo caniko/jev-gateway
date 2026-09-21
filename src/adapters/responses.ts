@@ -124,19 +124,32 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
       if (item.call_id) toolNameByCallId.set(item.call_id, name);
       turns.push({
         role: "assistant",
-        tool_calls: [{ tool: name, arguments: clip(item.arguments ?? item.input ?? "") }],
+        tool_calls: [
+          {
+            tool: name,
+            arguments: clip(item.arguments ?? item.input ?? ""),
+            ...(item.call_id ? { call_id: item.call_id } : {}),
+          },
+        ],
       });
     } else if (type === "local_shell_call") {
       if (item.call_id) toolNameByCallId.set(item.call_id, "local_shell");
       turns.push({
         role: "assistant",
-        tool_calls: [{ tool: "local_shell", arguments: clip((item.action?.command ?? []).join(" ")) }],
+        tool_calls: [
+          {
+            tool: "local_shell",
+            arguments: clip((item.action?.command ?? []).join(" ")),
+            ...(item.call_id ? { call_id: item.call_id } : {}),
+          },
+        ],
       });
     } else if (type?.endsWith("_call_output")) {
       turns.push({
         role: "tool_result",
         tool: toolNameByCallId.get(item.call_id ?? "") ?? "unknown",
         content: clip(item.output),
+        ...(item.call_id ? { call_id: item.call_id } : {}),
       });
     }
     // Reasoning items (encrypted), item references and hosted-tool traces carry nothing Jev can read.

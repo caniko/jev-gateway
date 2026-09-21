@@ -59,6 +59,9 @@ function toInput(req: ChatRequest, maxMessageChars: number): RouterInput | { ski
         role: "tool_result",
         tool: toolNameByCallId.get(message.tool_call_id ?? "") ?? "unknown",
         content: text,
+        // Preserved so the state builder can verify call/result association
+        // instead of matching on names alone.
+        ...(message.tool_call_id ? { call_id: message.tool_call_id } : {}),
       });
     } else if (message.tool_calls?.length) {
       turns.push({
@@ -67,6 +70,7 @@ function toInput(req: ChatRequest, maxMessageChars: number): RouterInput | { ski
         tool_calls: message.tool_calls.map((call) => ({
           tool: call.function.name,
           arguments: truncate(call.function.arguments, maxMessageChars),
+          call_id: call.id,
         })),
       });
     } else {
