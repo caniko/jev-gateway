@@ -14,6 +14,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  feature-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      features: ${{ steps.manifest.outputs.features }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: manifest
+        run: |
+          node --input-type=module <<'JS'
+          import {readFileSync, appendFileSync} from 'node:fs';
+          const {prs} = JSON.parse(readFileSync('integration/manifest.json', 'utf8'));
+          const features = prs.filter(p => p.state === 'pending').map(({id, headSha}) => {
+            if (!Number.isInteger(id) || !/^[0-9a-f]{40}$/.test(headSha)) throw new Error('invalid manifest head');
+            return {id, headSha};
+          });
+          appendFileSync(process.env.GITHUB_OUTPUT, `features=${JSON.stringify(features)}\n`);
+          JS
+
+  feature-check:
+    needs: feature-matrix
+    name: PR ${{ matrix.feature.id }} / Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.15", "24"]
+        feature: ${{ fromJSON(needs.feature-matrix.outputs.features) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.feature.headSha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: npm pack --dry-run
+
   check:
     runs-on: ubuntu-latest
     strategy:
@@ -64,4 +109,4 @@ jobs:
       - run: pnpm build
       - run: node scripts/v2-acceptance.mjs --install-binary
         # --install-binary fetches only the pinned registry artifact and
-        # verifies its version; BLOCKED (not failure) if unreachable.
+        # Missing binary or any required BLOCKED check fails acceptance.

@@ -61,6 +61,13 @@ graphics support were not supported by this environment.
 - Live model image interpretation has not been run.
 - The Canix consumer still points to upstream 0.3.1 and does not install
   the new plugin directory. No downstream revision/hash is approved yet.
+- `canix cache build .#jev-gateway` was attempted with the immutable
+  `a93aaaaabdf87198357a8b0fedbd2a2318b4df50` source. Source fetching passed
+  with unpacked NAR hash `sha256-xHxuNC2AjSeAAsunK4VnXtrwpzCJ+yfakGGIb6R0Lgw=`.
+  Dependency fetching was BLOCKED by pnpm 11's minimum-release-age policy:
+  six OpenCode 2.0.12 packages published on September 21 were inside the
+  24-hour cutoff. The policy was not weakened. The experimental consumer
+  edit was reverted; no fake dependency hash remains in Canix.
 - Required local v1 plugin migrations, session/data rollback, server API
   consumers, and LSP replacement checks remain pre-cutover requirements.
 - Upstream draft PR check rollups must be distinguished from fork master
