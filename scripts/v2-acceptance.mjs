@@ -196,15 +196,33 @@ const model = spawnLogged("model", "node", [FIX("acceptance-model.mjs")],
   { PORT: String(MODEL_PORT), LOG: join(work, "model-requests.log"), SCENARIO_FILE: join(project, "toolmode"), DELAY_FILE: join(project, "delayms") });
 let jev = spawnLogged("jev", "node", [join(ROOT, "scripts/mock-jev.mjs")],
   { MOCK_JEV_PORT: String(JEV_PORT), MOCK_JEV_SCRIPT: "no_tool_needed", MOCK_JEV_CONFIDENCE: "0.95", MOCK_JEV_ARG_CERTAINTY: "0.5" });
-await waitFor(() => model.log.join("").includes(`acceptance-model on 127.0.0.1:${MODEL_PORT}`), 15000, "model stub").catch((e) => fail("preflight", e.message));
-await waitFor(() => jev.log.join("").includes("mock-jev on"), 15000, "mock jev").catch((e) => fail("preflight", e.message));
+try {
+  await waitFor(() => model.log.join("").includes(`acceptance-model on 127.0.0.1:${MODEL_PORT}`), 15000, "model stub");
+} catch (e) {
+  fail("preflight", e.message);
+  printSummary();
+  process.exit(1);
+}
+try {
+  await waitFor(() => jev.log.join("").includes("mock-jev on"), 15000, "mock jev");
+} catch (e) {
+  fail("preflight", e.message);
+  printSummary();
+  process.exit(1);
+}
 const jevCalls = () => jev.log.join("").split("\n").filter((l) => l.includes('"n":')).length;
 // Restart mock-jev with a new script (selection scenarios need picked tools).
 async function rejev(script, confidence = "0.95") {
   try { jev.child.kill("SIGKILL"); } catch {}
   jev = spawnLogged("jev", "node", [join(ROOT, "scripts/mock-jev.mjs")],
     { MOCK_JEV_PORT: String(JEV_PORT), MOCK_JEV_SCRIPT: script, MOCK_JEV_CONFIDENCE: confidence, MOCK_JEV_ARG_CERTAINTY: "0.5" });
-  await waitFor(() => jev.log.join("").includes("mock-jev on"), 15000, "mock jev respawn").catch((e) => fail("preflight", e.message));
+  try {
+  await waitFor(() => jev.log.join("").includes("mock-jev on"), 15000, "mock jev respawn");
+} catch (e) {
+  fail("preflight", e.message);
+  printSummary();
+  process.exit(1);
+}
 }
 
 // gateway (built dist) for gateway-in-loop scenarios
@@ -213,9 +231,15 @@ const gateway = spawnLogged("gateway", "node", [join(GATEWAY_ROOT, "dist/index.j
   PORT: String(GW_PORT), UPSTREAM_BASE_URL: `http://127.0.0.1:${MODEL_PORT}/v1`,
   TYPESAFE_BASE_URL: `http://127.0.0.1:${JEV_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
 });
-await waitFor(async () => {
-  try { const r = await httpPost(GW_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
-}, 15000, "gateway health").catch((e) => fail("preflight", e.message));
+try {
+  await waitFor(async () => {
+    try { const r = await httpPost(GW_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
+  }, 60000, "gateway health");
+} catch (e) {
+  fail("preflight", e.message);
+  printSummary();
+  process.exit(1);
+}
 
 // Packaged plugin under test: pack the gateway checkout and install the
 // tarball without dev dependencies, so plugin checks exercise the shipped
@@ -398,9 +422,15 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
     PORT: String(GW2_PORT), UPSTREAM_BASE_URL: `http://127.0.0.1:${MODEL_PORT}/v1`,
     TYPESAFE_BASE_URL: `http://127.0.0.1:${AUTH_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
   });
-  await waitFor(async () => {
-    try { const r = await httpPost(GW2_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
-  }, 15000, "gateway2 health").catch((e) => fail("preflight", e.message));
+  try {
+    await waitFor(async () => {
+      try { const r = await httpPost(GW2_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
+    }, 60000, "gateway2 health");
+  } catch (e) {
+    fail("preflight", e.message);
+    printSummary();
+    process.exit(1);
+  }
   writeProject(`http://127.0.0.1:${GW2_PORT}/v1`);
   await runOpencode(bin, iso, project, ["run", "--standalone", "credential probe"]);
   try { gw2.child.kill("SIGKILL"); auth.child.kill("SIGKILL"); } catch {}
@@ -435,7 +465,13 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   // resolves its own project config and never touches the service endpoint.
   const model2 = spawnLogged("model2", "node", [FIX("acceptance-model.mjs")],
     { PORT: String(MODEL2_PORT), LOG: join(work, "model2-requests.log"), SCENARIO_FILE: join(work, "nosuchtoolmode") });
-  await waitFor(() => model2.log.join("").includes(`acceptance-model on 127.0.0.1:${MODEL2_PORT}`), 15000, "model2 stub").catch((e) => fail("preflight", e.message));
+  try {
+  await waitFor(() => model2.log.join("").includes(`acceptance-model on 127.0.0.1:${MODEL2_PORT}`), 15000, "model2 stub");
+} catch (e) {
+  fail("preflight", e.message);
+  printSummary();
+  process.exit(1);
+}
   const model2Log = () => readFileSync(join(work, "model2-requests.log"), "utf8").split("\n").filter(Boolean);
   const svcCfg = {
     $schema: "https://opencode.ai/config.json", model: "acc-probe/acc-model", small_model: "acc-probe/acc-model",
@@ -537,16 +573,19 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   else fail("cancellation-no-retry-storm", `signal=${killed.signal} code=${killed.code} before=${before} after=${after} settled=${settled}`);
 }
 
-const blockedNames = results.filter((r) => r.status === "BLOCKED").map((r) => r.name);
-// Only documented version-limited checks may stay BLOCKED without failing
-// the gate: 2.0.12 exposes fixture MCP tools on no observable path (see
-// docs/acceptance.md). Any other BLOCKED (e.g. no usable binary) fails,
-// so a vacuous green run is impossible.
-const allowedBlocked = new Set(["mcp-invocation"]);
-const unexpectedBlocked = blockedNames.filter((n) => !allowedBlocked.has(n));
-if (unexpectedBlocked.length) {
-  console.log(`\nFAIL: unexpected BLOCKED checks: ${unexpectedBlocked.join(", ")}`);
-  process.exit(1);
+function printSummary() {
+  const blockedNames = results.filter((r) => r.status === "BLOCKED").map((r) => r.name);
+  // Only documented version-limited checks may stay BLOCKED without failing
+  // the gate: 2.0.12 exposes fixture MCP tools on no observable path (see
+  // docs/acceptance.md). Any other BLOCKED (e.g. no usable binary) fails,
+  // so a vacuous green run is impossible.
+  const allowedBlocked = new Set(["mcp-invocation"]);
+  const unexpectedBlocked = blockedNames.filter((n) => !allowedBlocked.has(n));
+  if (unexpectedBlocked.length) {
+    console.log(`\nFAIL: unexpected BLOCKED checks: ${unexpectedBlocked.join(", ")}`);
+    process.exit(1);
+  }
+  console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${blockedNames.length} blocked`);
 }
-console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${blockedNames.length} blocked`);
+printSummary();
 process.exit(failed ? 1 : 0);
