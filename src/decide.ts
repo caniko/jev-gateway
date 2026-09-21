@@ -191,7 +191,9 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (resolved) {
+  // Transports that forbid synthetic answers (e.g. stored Responses
+  // sessions) still get selection via forced/hint, never direct.
+  if (resolved && input.allowDirect !== false) {
     return {
       mode: "direct",
       tool: plan.name,

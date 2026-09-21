@@ -92,6 +92,14 @@ export interface RouterInput {
    * the conversation instead, for requests where rewriting tool_choice is rejected or too costly.
    */
   steer?: "tool_choice" | "hint";
+  /**
+   * False when a synthetic direct answer would be unsafe on this transport
+   * even though selection is fine: e.g. Responses `store: true`, where the
+   * gateway's unstored direct reply (store:false, previous_response_id:null)
+   * must not masquerade as a stored upstream response a later request could
+   * chain from. Forced/hint delegation still applies.
+   */
+  allowDirect?: boolean;
 }
 
 /** A tool call Jev produced in full, to be rendered in the client's wire format. */
