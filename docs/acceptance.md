@@ -27,13 +27,15 @@ Binary source: `--binary PATH`, `OPENCODE_V2_BIN`, or `--install-binary`
 access only). Without a usable binary every binary-driven check reports
 BLOCKED. `GATEWAY_ROOT` selects the gateway build under test.
 
-Current checks (19): version, text roundtrip, native tool call/result
+Current checks (20): version, text roundtrip, native tool call/result
 linkage, MCP connection (server-log evidence that the fixture connected
 with 2 tools), MCP invocation (BLOCKED, see below), selection through
 the real binary + gateway (forced `tool_choice`), plugin influence (the
 configured plugin's `[jev-routing]` hint reaches model traffic and the
 session completes — proving load plus exactly-once hook behavior),
 plugin fail-open (dead gateway leaves the run untouched with no hint),
+plugin-only influence (provider straight to stub, so hints plus a Jev
+consultation prove the plugin path with the proxy structurally absent),
 multi-turn continuity, deny/ask safety (no execution either way), image
 bypass with 0 Jev calls, both credential directions, standalone
 isolation, existing shared service (own-config-wins, zero cross-talk on
