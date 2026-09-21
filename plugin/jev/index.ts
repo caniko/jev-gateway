@@ -1,12 +1,18 @@
 import { Plugin } from "@opencode/plugin";
+import type { SessionContext } from "@opencode/plugin/promise/session";
+// NOTE: @opencode/ai is a type-only import (erased at runtime, so the packed
+// plugin never needs it installed). It pins the exact 2.0.12 hook payload
+// shapes this adapter was verified against.
+import type { Message, SystemPart } from "@opencode/ai";
 
 // Thin OpenCode v2 integration for jev-gateway.
 //
-// What this does: on each primary agent-loop model request, it asks the
-// gateway's /router/decide endpoint which tool Jev would select for the
-// visible tool snapshot, and appends that selection as a routing *hint* to
-// the system prompt. The main model still decides, executes, and owns
-// approvals; nothing is forced, nothing is executed here.
+// What this does: on each primary agent-loop model request, it maps the
+// visible v2 session context to the gateway's routing representation,
+// asks /router/decide which tool Jev would select, and appends that
+// selection as a routing *hint* to the system prompt. The main model still
+// decides, executes, and owns approvals; nothing is forced, nothing is
+// executed here.
 //
 // What this deliberately does NOT do:
 // - No direct/synthetic model responses (the `context` hook exposes no
@@ -15,12 +21,15 @@ import { Plugin } from "@opencode/plugin";
 // - No network calls except the single gateway decision fetch, bounded by
 //   timeout and fail-open: any failure leaves the request untouched.
 //
-// Multimodal requests (anything Jev cannot inspect) skip the gateway call
-// entirely, mirroring the proxy's conservative passthrough.
+// Mapping is conservative: anything Jev cannot inspect (images, files,
+// audio, encrypted blobs, unknown part shapes, malformed calls/results)
+// bypasses the gateway entirely rather than presenting chopped evidence
+// as complete. Reasoning parts are skipped: model-internal thinking is
+// not routing evidence.
 export interface JevPluginOptions {
   /** Gateway origin, e.g. http://127.0.0.1:8791. Defaults to the launcher port. */
   gatewayUrl?: string;
-  /** Decision fetch budget in ms. Defaults to 1500. */
+  /** Decision fetch budget in ms, integer 1..120000. Defaults to 1500. */
   timeoutMs?: number;
   /** Set to false to load the plugin without registering the hook. */
   enabled?: boolean;
@@ -32,25 +41,64 @@ export interface HintOutcome {
   tool?: string;
 }
 
+export interface ResolvedConfig {
+  gatewayUrl: string;
+  timeoutMs: number;
+}
+
 type FetchImpl = typeof fetch;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Map a v2 session `context` event to a chat-completions request preserving
- * the full routing context: system instructions, every text turn, and
- * tool-call/result association by call ID. Returns `opaque` when any part
- * is something Jev cannot inspect (images, files, audio, unknown shapes),
- * in which case the caller must skip the gateway entirely rather than
- * present chopped evidence as complete.
- *
- * Observed v2 shapes (pinned 2.0.12): content parts carry
- * `{type:"text",text}`, `{type:"tool-call",id,name,input}`, or
- * `{type:"tool-result",id,name,result:{type:"text",value}}`; system is
- * `[{type:"text",text}]`.
- */
+function safeJson(value: unknown): string | undefined {
+  try {
+    const out = JSON.stringify(value);
+    return typeof out === "string" ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Explicit option contract; unknown keys and malformed values throw at load. */
+export function resolveOptions(raw: unknown): ResolvedConfig {
+  const options = raw === undefined ? {} : raw;
+  if (!isRecord(options)) throw new Error("jev-gateway: options must be an object");
+  for (const key of Object.keys(options)) {
+    if (key !== "gatewayUrl" && key !== "timeoutMs" && key !== "enabled") {
+      throw new Error(`jev-gateway: unknown option "${key}"`);
+    }
+  }
+  if (options.enabled !== undefined && typeof options.enabled !== "boolean") {
+    throw new Error(`jev-gateway: enabled must be a boolean, got "${String(options.enabled)}"`);
+  }
+  const gatewayUrl = options.gatewayUrl ?? "http://127.0.0.1:8791";
+  if (typeof gatewayUrl !== "string") {
+    throw new Error(`jev-gateway: gatewayUrl must be a string, got "${String(gatewayUrl)}"`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(gatewayUrl);
+  } catch {
+    throw new Error(`jev-gateway: invalid gatewayUrl "${gatewayUrl}"`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`jev-gateway: gatewayUrl must be http(s), got "${parsed.protocol}"`);
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error("jev-gateway: gatewayUrl must not embed credentials");
+  }
+  if (parsed.search !== "" || parsed.hash !== "") {
+    throw new Error("jev-gateway: gatewayUrl must not carry a query string or fragment");
+  }
+  const timeoutMs: unknown = options.timeoutMs ?? 1500;
+  if (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) {
+    throw new Error(`jev-gateway: timeoutMs must be an integer 1..120000, got "${String(timeoutMs)}"`);
+  }
+  return { gatewayUrl, timeoutMs };
+}
+
 export interface ChatMessage {
   role: string;
   content?: string;
@@ -58,178 +106,266 @@ export interface ChatMessage {
   tool_call_id?: string;
 }
 
-export function toChatMessages(event: {
-  system?: unknown;
-  messages?: unknown;
-}): { messages?: ChatMessage[]; opaque?: boolean } {
-  const out: ChatMessage[] = [];
-  const system = event.system;
-  if (Array.isArray(system)) {
-    const texts: string[] = [];
-    for (const part of system) {
-      if (!isRecord(part) || (part as { type?: unknown }).type !== "text" || typeof (part as { text?: unknown }).text !== "string") {
-        return { opaque: true };
-      }
-      texts.push((part as { text: string }).text);
-    }
-    const joined = texts.join("\n\n");
-    if (joined.trim() !== "") out.push({ role: "system", content: joined });
-  } else if (system !== undefined) {
-    return { opaque: true };
+type TextOrOpaque = { text: string } | { opaque: true };
+
+/** Classify one tool result: supported text/structured evidence, else opaque. */
+export function toolResultText(result: unknown): TextOrOpaque {
+  if (!isRecord(result)) return { opaque: true };
+  const type = result.type;
+  if (type === "text" || type === "error") {
+    if (typeof result.value === "string") return { text: result.value };
+    const json = safeJson(result.value);
+    return json === undefined ? { opaque: true } : { text: json };
   }
+  if (type === "json") {
+    const json = safeJson(result.value);
+    return json === undefined ? { opaque: true } : { text: json };
+  }
+  if (type === "content") {
+    if (!Array.isArray(result.value)) return { opaque: true };
+    const texts: string[] = [];
+    for (const item of result.value) {
+      if (!isRecord(item)) return { opaque: true };
+      // A file entry (e.g. an MCP-returned screenshot) is evidence Jev
+      // cannot inspect: bypass rather than serialize it into text.
+      if (item.type === "text" && typeof item.text === "string") {
+        texts.push(item.text);
+        continue;
+      }
+      return { opaque: true };
+    }
+    return { text: texts.join("\n") };
+  }
+  return { opaque: true };
+}
+
+/** Encode tool-call input as a JSON arguments string, or refuse. */
+function encodeArguments(input: unknown): { args: string } | { opaque: true } {
+  if (typeof input === "string") {
+    try {
+      JSON.parse(input);
+      return { args: input };
+    } catch {
+      return { args: JSON.stringify(input) };
+    }
+  }
+  const json = safeJson(input ?? {});
+  return json === undefined ? { opaque: true } : { args: json };
+}
+
+/**
+ * Map a v2 session `context` event to chat-completions messages preserving
+ * routing context: system instructions, every text turn in order, and
+ * tool-call/result association by call ID. Returns `opaque` when anything
+ * present is something Jev cannot inspect.
+ *
+ * Pinned 2.0.12 shapes: content parts carry `{type:"text",text}`,
+ * `{type:"tool-call",id,name,input}`, `{type:"tool-result",id,name,result}`,
+ * `{type:"media",...}`, `{type:"reasoning",...}`, or
+ * `{type:"compaction",...}`; system is `[{type:"text",text}]`.
+ */
+export function toChatMessages(event: { system?: unknown; messages?: unknown }): {
+  messages?: ChatMessage[];
+  opaque?: boolean;
+} {
+  const out: ChatMessage[] = [];
+  if (event.system !== undefined && !Array.isArray(event.system)) return { opaque: true };
+  const system: ReadonlyArray<SystemPart> = Array.isArray(event.system)
+    ? (event.system as ReadonlyArray<SystemPart>)
+    : [];
+  const sysTexts: string[] = [];
+  for (const part of system) {
+    if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") return { opaque: true };
+    sysTexts.push(part.text);
+  }
+  const sysJoined = sysTexts.join("\n\n");
+  if (sysJoined.trim() !== "") out.push({ role: "system", content: sysJoined });
+
+  const messages: ReadonlyArray<Message> = Array.isArray(event.messages)
+    ? (event.messages as ReadonlyArray<Message>)
+    : [];
   if (!Array.isArray(event.messages)) return out.length > 0 ? { messages: out } : {};
-  for (const message of event.messages) {
-    if (!isRecord(message)) continue;
-    const role = typeof (message as { role?: unknown }).role === "string" ? ((message as { role: string }).role) : undefined;
-    if (role === undefined) continue;
-    const content = (message as { content?: unknown }).content;
+  for (const message of messages) {
+    if (!isRecord(message) || typeof message.role !== "string") continue;
+    const role: string = message.role;
+    const content = message.content;
     if (typeof content === "string") {
       out.push({ role, content });
       continue;
     }
     if (!Array.isArray(content)) continue;
     const texts: string[] = [];
-    const calls: ChatMessage["tool_calls"] = [];
-    let toolTurn: ChatMessage | undefined;
+    const calls: NonNullable<ChatMessage["tool_calls"]> = [];
+    // Result turns emitted for the current message, so trailing message
+    // text can join them instead of becoming a mislabeled turn.
+    const resultTurns: ChatMessage[] = [];
+    const flushAssistant = () => {
+      if (texts.join("").trim() !== "" || calls.length > 0) {
+        out.push({
+          role,
+          ...(texts.join("").trim() !== "" ? { content: texts.join("\n") } : {}),
+          ...(calls.length > 0 ? { tool_calls: calls.splice(0) } : {}),
+        });
+        texts.length = 0;
+      }
+    };
     for (const part of content) {
       if (!isRecord(part)) return { opaque: true };
-      const type = (part as { type?: unknown }).type;
-      if (
-        "image_url" in part || "input_audio" in part || "file" in part || "inlineData" in part || "fileData" in part
-      ) {
+      if (part.type === "text" && typeof part.text === "string") {
+        texts.push(part.text);
+        continue;
+      }
+      if (part.type === "media") return { opaque: true };
+      if (part.type === "reasoning") continue;
+      if (part.type === "compaction") {
+        if (typeof part.text === "string" && part.text.trim() !== "") {
+          texts.push(part.text);
+          continue;
+        }
         return { opaque: true };
       }
-      if (type === "text" && typeof (part as { text?: unknown }).text === "string") {
-        texts.push((part as { text: string }).text);
+      if (part.type === "tool-call") {
+        if (typeof part.id !== "string" || typeof part.name !== "string") return { opaque: true };
+        const encoded = encodeArguments((part as { input?: unknown }).input);
+        if (!("args" in encoded)) return { opaque: true };
+        calls.push({ id: part.id, type: "function", function: { name: part.name, arguments: encoded.args } });
         continue;
       }
-      if (type === "tool-call") {
-        const p = part as { id?: unknown; name?: unknown; input?: unknown };
-        if (typeof p.id !== "string" || typeof p.name !== "string") return { opaque: true };
-        calls.push({
-          id: p.id,
-          type: "function",
-          function: { name: p.name, arguments: typeof p.input === "string" ? p.input : JSON.stringify(p.input ?? {}) },
-        });
-        continue;
-      }
-      if (type === "tool-result") {
-        const p = part as { id?: unknown; result?: unknown };
-        if (typeof p.id !== "string") return { opaque: true };
-        const result = p.result as { type?: unknown; value?: unknown } | undefined;
-        const text = isRecord(result) && result.type === "text" && typeof result.value === "string"
-          ? result.value
-          : JSON.stringify(result ?? null);
-        out.push({ role: "tool", tool_call_id: p.id, content: text });
-        toolTurn = out[out.length - 1];
+      if (part.type === "tool-result") {
+        if (typeof part.id !== "string") return { opaque: true };
+        const classified = toolResultText((part as { result?: unknown }).result);
+        if (!("text" in classified)) return { opaque: true };
+        // Result parts always carry their call ID, whatever message role
+        // they arrived in, so association survives without silent drops.
+        // Pending text is NOT flushed as a separate turn here: for tool
+        // messages it joins the result turns at message end.
+        if (role !== "tool") flushAssistant();
+        const turn: ChatMessage = { role: "tool", tool_call_id: part.id, content: classified.text };
+        out.push(turn);
+        resultTurns.push(turn);
         continue;
       }
       return { opaque: true };
     }
     if (role === "tool") {
-      if (!toolTurn && texts.join("").trim() !== "") out.push({ role, content: texts.join("\n") });
+      // Message-level text joins this message's own result turns (keeping
+      // every word with its call association). With no results it stands
+      // alone; the gateway then attributes it as unknown, which the test
+      // pins as the documented fallback.
+      if (texts.join("").trim() !== "") {
+        if (resultTurns.length > 0) {
+          const last = resultTurns[resultTurns.length - 1] as { content?: string };
+          last.content = `${last.content ?? ""}\n${texts.join("\n")}`;
+        } else {
+          out.push({ role, content: texts.join("\n") });
+        }
+      }
       continue;
     }
-    if (texts.join("").trim() !== "" || calls.length > 0) {
-      out.push({ role, ...(texts.join("").trim() !== "" ? { content: texts.join("\n") } : {}), ...(calls.length > 0 ? { tool_calls: calls } : {}) });
-    }
+    flushAssistant();
   }
   return out.length > 0 ? { messages: out } : {};
 }
 
+export interface DecideResult {
+  mode: unknown;
+  tool: unknown;
+  confidence: unknown;
+}
+
+/** Validate a gateway decision against the captured roster before applying. */
+export function parseDecision(
+  value: unknown,
+  roster: ReadonlyArray<string>,
+): { tool: string; confidence: number; mode: string } | { error: string } {
+  if (!isRecord(value)) return { error: "decision_malformed" };
+  const { mode, tool, confidence } = value as unknown as DecideResult;
+  if (mode !== "forced" && mode !== "hint" && mode !== "direct") {
+    return { error: `decision_${String(mode ?? "unknown")}` };
+  }
+  if (typeof tool !== "string" || tool === "" || !roster.includes(tool)) {
+    return { error: "decision_unknown_tool" };
+  }
+  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    return { error: "decision_unverified" };
+  }
+  return { tool, confidence, mode };
+}
+
+function modelLabel(model: unknown): string | undefined {
+  if (!isRecord(model)) return undefined;
+  const { providerID, id } = model as { providerID?: unknown; id?: unknown };
+  if (typeof providerID !== "string" || providerID === "" || typeof id !== "string" || id === "") return undefined;
+  return `${providerID}/${id}`;
+}
+
+/** Minimal structural surface applyJevHint needs; SessionContext satisfies it. */
+export interface HintEvent {
+  tools?: Record<string, { description?: unknown; input?: unknown }>;
+  messages?: unknown;
+  system?: unknown;
+  model?: unknown;
+}
+
 export async function applyJevHint(
-  event: {
-    tools?: Record<string, { description?: unknown; input?: unknown }>;
-    messages?: unknown;
-    system?: unknown;
-  },
-  config: { gatewayUrl: string; timeoutMs: number },
+  event: HintEvent,
+  config: ResolvedConfig,
   fetchImpl: FetchImpl = fetch,
 ): Promise<HintOutcome> {
   const tools = event.tools ?? {};
   const names = Object.keys(tools);
   if (names.length === 0) return { applied: false, reason: "no_tools" };
-  const { messages, opaque } = toChatMessages({ system: event.system, messages: event.messages });
+  const { messages, opaque } = toChatMessages(event);
   if (opaque) return { applied: false, reason: "multimodal" };
   if (messages === undefined || messages.length === 0) return { applied: false, reason: "no_text" };
-  let decision: { mode?: unknown; tool?: unknown; confidence?: unknown };
+  const model = modelLabel(event.model);
+  if (model === undefined) return { applied: false, reason: "malformed_model" };
+  let decision: unknown;
   try {
     const response = await fetchImpl(`${config.gatewayUrl.replace(/\/+$/, "")}/router/decide`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "jev-plugin",
+        model,
         messages,
         tools: names.map((name) => ({
           type: "function",
-          function: { name, description: String(tools[name]?.description ?? ""), parameters: tools[name]?.input ?? {} },
+          function: {
+            name,
+            description: String(tools[name]?.description ?? ""),
+            parameters: tools[name]?.input ?? {},
+          },
         })),
       }),
       signal: AbortSignal.timeout(config.timeoutMs),
     });
     if (!response.ok) return { applied: false, reason: `gateway_http_${response.status}` };
-    decision = (await response.json()) as typeof decision;
+    decision = (await response.json()) as unknown;
   } catch {
     return { applied: false, reason: "gateway_unreachable" };
   }
-  const mode = decision?.mode;
-  const tool = decision?.tool;
-  // The gateway only ever names tools from the snapshot sent above, but
-  // validate anyway: an unknown, empty, or non-string tool leaves the
-  // request unchanged rather than injecting untrusted text.
-  if (
-    (mode === "forced" || mode === "hint" || mode === "direct") &&
-    typeof tool === "string" &&
-    tool !== "" &&
-    names.includes(tool)
-  ) {
-    const confidence =
-      typeof decision?.confidence === "number" && Number.isFinite(decision.confidence)
-        ? decision.confidence.toFixed(2)
-        : "n/a";
-    // The hint needs an array to land in; anything else leaves the request
-    // unchanged rather than pretending it was annotated.
-    if (!Array.isArray(event.system)) return { applied: false, reason: "no_system_target" };
-    event.system.push({
-      type: "text",
-      text: `[jev-routing] Jev suggests tool "${tool}" (confidence ${confidence}) for this request.`,
-    });
-    return { applied: true, reason: String(mode), tool };
-  }
-  return { applied: false, reason: `decision_${String(mode ?? "unknown")}` };
+  const parsed = parseDecision(decision, names);
+  if (!("tool" in parsed)) return { applied: false, reason: parsed.error };
+  // The hint needs an array to land in; anything else leaves the request
+  // unchanged rather than pretending it was annotated.
+  if (!Array.isArray(event.system)) return { applied: false, reason: "no_system_target" };
+  event.system.push({
+    type: "text",
+    text: `[jev-routing] Jev suggests tool "${parsed.tool}" (confidence ${parsed.confidence.toFixed(2)}) for this request.`,
+  });
+  return { applied: true, reason: parsed.mode, tool: parsed.tool };
 }
 
 export default Plugin.define({
   id: "jev-gateway",
   async setup(ctx) {
-    const options = (ctx.options ?? {}) as JevPluginOptions;
-    if (options.enabled === false) return;
-    const gatewayUrl = options.gatewayUrl ?? "http://127.0.0.1:8791";
-    const timeoutMs = options.timeoutMs ?? 1500;
-    // Validate explicit configuration at load time; unknown option keys are
-    // rejected so typos cannot silently change behavior.
-    for (const key of Object.keys(options)) {
-      if (key !== "gatewayUrl" && key !== "timeoutMs" && key !== "enabled") {
-        throw new Error(`jev-gateway: unknown option "${key}"`);
-      }
-    }
-    let parsed: URL;
-    try {
-      parsed = new URL(gatewayUrl);
-    } catch {
-      throw new Error(`jev-gateway: invalid gatewayUrl "${gatewayUrl}"`);
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error(`jev-gateway: gatewayUrl must be http(s), got "${parsed.protocol}"`);
-    }
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      throw new Error(`jev-gateway: timeoutMs must be a positive number, got "${String(timeoutMs)}"`);
-    }
+    const config = resolveOptions(ctx.options);
+    if ((ctx.options as JevPluginOptions | undefined)?.enabled === false) return;
     // `context` covers the agent loop (including continuations) but not
     // title/compaction/generate, which have their own hooks.
     await ctx.session.hook("context", async (event) => {
       try {
-        await applyJevHint(event as never, { gatewayUrl, timeoutMs });
+        await applyJevHint(event, config);
       } catch {
         // Fail open: routing assistance must never break a model request.
       }
