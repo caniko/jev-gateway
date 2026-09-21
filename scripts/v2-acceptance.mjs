@@ -145,7 +145,7 @@ if (!existsSync(join(GATEWAY_ROOT, "dist/index.js"))) { fail("preflight", `gatew
 
 const { bin, blocked, error } = resolveBinary();
 if (error) { fail("preflight", error); process.exit(1); }
-const ALL_CHECKS = ["binary-version","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
+const ALL_CHECKS = ["binary-version","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","plugin-influence","plugin-fail-open","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
 if (blocked) {
   for (const name of ALL_CHECKS) report(name, "BLOCKED", blocked);
   process.exit(0);
@@ -271,6 +271,37 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   if (r.code === 0 && forced && jevDelta > 0 && r.out.includes("acceptance-final-answer"))
     report("selection-via-opencode", "PASS", "Jev selection reached model as forced tool_choice, tool ran");
   else fail("selection-via-opencode", `exit=${r.code} forced=${forced} jevDelta=${jevDelta}`);
+}
+{
+  // Plugin influence + lifecycle through the real binary: the configured
+  // jev-gateway plugin directory must load, run its context hook once per
+  // primary request, and append the routing hint to the outgoing traffic.
+  // mock-jev is scripted to pick `read` so a hint is expected.
+  const pluginDir = process.env.PLUGIN_DIR ?? join(GATEWAY_ROOT, "plugin/jev");
+  if (!existsSync(join(pluginDir, "index.ts"))) {
+    report("plugin-influence", "BLOCKED", `no plugin entrypoint at ${pluginDir}`);
+    report("plugin-fail-open", "BLOCKED", `no plugin entrypoint at ${pluginDir}`);
+  } else {
+    await rejev("read");
+    writeProject(GW, { rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: GW.replace(/\/v1$/, ""), timeoutMs: 8000 } }] } });
+    const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
+    const hints = modelLog().filter((e) => (e.body ?? "").includes("[jev-routing]")).length;
+    await rejev("no_tool_needed");
+    if (r.code === 0 && hints >= 1 && r.out.includes("acceptance-final-answer"))
+      report("plugin-influence", "PASS", `routing hint reached model traffic ${hints}x, session completed (load+hook proven)`);
+    else fail("plugin-influence", `exit=${r.code} hints=${hints}`);
+
+    // Fail-open: with the gateway down, the loaded plugin must not break
+    // the run and must append no hint.
+    writeProject(GW, { rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: "http://127.0.0.1:19999", timeoutMs: 2000 } }] } });
+    const before = modelLog().length;
+    const r2 = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
+    const hints2 = modelLog().slice(before).filter((e) => (e.body ?? "").includes("[jev-routing]")).length;
+    writeProject(GW);
+    if (r2.code === 0 && hints2 === 0 && r2.out.includes("acceptance-final-answer"))
+      report("plugin-fail-open", "PASS", "dead gateway left the run untouched, no hint");
+    else fail("plugin-fail-open", `exit=${r2.code} hints=${hints2}`);
+  }
 }
 {
   // multi-turn: continue latest session, assert history grows without server refs
