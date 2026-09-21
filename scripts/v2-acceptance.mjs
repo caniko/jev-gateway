@@ -14,6 +14,7 @@
 // Every PASS below corresponds to an executed assertion in this process.
 // Usage: node scripts/v2-acceptance.mjs [--install-binary] [--binary PATH] [--keep]
 import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -22,6 +23,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "2.0.12";
+const CLI_SHA256 = "2b0825721cb12f9bca3d5099588087d557a21ed2b5b56efebea3f17dc5f79e6a";
 const args = new Set(process.argv.slice(2));
 const KEEP = args.has("--keep");
 
@@ -135,8 +137,8 @@ const cleanup = () => { for (const c of children) try { c.child.kill("SIGKILL");
 process.on("exit", cleanup);
 process.on("SIGINT", () => { cleanup(); process.exit(2); });
 
-const MODEL_PORT = 18081, JEV_PORT = 18090, GW_PORT = 18791, GW2_PORT = 18792, AUTH_PORT = 18091, MODEL2_PORT = 18083;
-for (const p of [MODEL_PORT, JEV_PORT, GW_PORT, GW2_PORT, AUTH_PORT, MODEL2_PORT]) {
+const MODEL_PORT = 18081, JEV_PORT = 18090, GW_PORT = 18791, GW2_PORT = 18792, AUTH_PORT = 18091, MODEL2_PORT = 18083, SERVER_PORT = 18793;
+for (const p of [MODEL_PORT, JEV_PORT, GW_PORT, GW2_PORT, AUTH_PORT, MODEL2_PORT, SERVER_PORT]) {
   if (!freePort(p)) { fail("preflight", `loopback port ${p} busy`); process.exit(1); }
 }
 // Gateway under test: an integrated checkout (master after reintegration).
@@ -146,7 +148,16 @@ if (!existsSync(join(GATEWAY_ROOT, "dist/index.js"))) { fail("preflight", `gatew
 
 const { bin, blocked, error } = resolveBinary();
 if (error) { fail("preflight", error); process.exit(1); }
-const ALL_CHECKS = ["binary-version","installed-artifact","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","plugin-influence","plugin-fail-open","plugin-only-influence","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
+const ALL_CHECKS = [
+  "binary-version", "installed-artifact", "text-roundtrip", "native-tool-loop", "mcp-connection",
+  "mcp-invocation", "mcp-denial", "mcp-codemode-invocation", "mcp-codemode-denial",
+  "mcp-direct-ask-once", "mcp-direct-ask-reject", "mcp-nested-ask-once", "mcp-nested-ask-reject",
+  "selection-via-opencode", "plugin-influence", "plugin-fail-open", "plugin-only-influence",
+  "multi-turn-continuity", "deny-write-side-effect-free", "ask-write-safe-default",
+  "image-bypass-via-gateway", "credentials-routing", "jev-auth-credential",
+  "standalone-isolation", "shared-service-existing", "gateway-health",
+  "balanced-tool-execution", "cancellation-no-retry-storm",
+];
 if (blocked) {
   // Single exit policy: record BLOCKED for every check and fall through to
   // the strict gate below, which fails on anything but the documented
@@ -155,8 +166,12 @@ if (blocked) {
 }
 if (!blocked) {
 const ver = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 30000 });
-if (!ver.stdout?.includes(VERSION)) fail("binary-version", `expected ${VERSION}, got ${JSON.stringify(ver.stdout?.trim())}`);
-else report("binary-version", "PASS", ver.stdout.trim());
+const binaryHash = createHash("sha256").update(readFileSync(bin)).digest("hex");
+if (ver.status !== 0 || ver.stdout?.trim() !== `opencode v${VERSION}` || binaryHash !== CLI_SHA256) {
+  fail("binary-version", `expected pinned Linux x64 ${VERSION} artifact; version=${JSON.stringify(ver.stdout?.trim())}, sha256=${binaryHash}`);
+  printSummary();
+  process.exit(1);
+} else report("binary-version", "PASS", `${ver.stdout.trim()} sha256=${binaryHash}`);
 
 const iso = {
   home: join(work, "home"), config: join(work, "home/.config"), data: join(work, "home/.local/share"),
@@ -341,6 +356,72 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   }
 }
 {
+  // Exercise actual pending permissions on the supported v2 server API.
+  // Unlike CLI --auto / no-TTY refusal, the model pauses before an MCP
+  // mutation and the test explicitly approves or rejects that request.
+  const { OpenCode } = await import(join(work, "pkginstall/node_modules/@opencode/client/dist/promise/client.js"));
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+  const server = spawn(bin, ["serve", "--hostname", "127.0.0.1", "--port", String(SERVER_PORT)], {
+    cwd: project, env: hermeticEnv(iso), stdio: ["ignore", "pipe", "pipe"],
+  });
+  const serverLog = [];
+  server.stdout.on("data", (d) => serverLog.push(d.toString()));
+  server.stderr.on("data", (d) => serverLog.push(d.toString()));
+  children.push({ name: "permission-server", child: server, log: serverLog });
+  try {
+    await waitFor(() => /server password (\S+)/.test(serverLog.join("")), 20000, "ephemeral server authentication");
+    const password = serverLog.join("").match(/server password (\S+)/)[1];
+    const client = OpenCode.make({
+      baseUrl: `http://127.0.0.1:${SERVER_PORT}`,
+      headers: { authorization: "Basic " + Buffer.from(`opencode:${password}`).toString("base64") },
+    });
+    await waitFor(async () => {
+      try { await client.server.info(); return true; } catch { return false; }
+    }, 20000, "permission server");
+    for (const codemode of [false, true]) for (const decision of ["once", "reject"]) {
+      writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+      const path = join(project, "opencode.json");
+      const cfg = JSON.parse(readFileSync(path, "utf8"));
+      cfg.mcp.servers.fixture.codemode = codemode;
+      writeFileSync(path, JSON.stringify(cfg));
+      await client.location.reload();
+      await waitFor(async () => {
+        const servers = await client.mcp.list({ location: { directory: project } });
+        return servers.data.some((s) => s.name === "fixture" && s.status.status === "connected");
+      }, 30000, "MCP server startup before first prompt");
+      const marker = `${codemode ? "nested" : "direct"}-${decision}`;
+      writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, marker, noWarmup: true })}`);
+      const session = await client.session.create({
+        location: { directory: project }, model: { providerID: "acc-probe", id: "acc-model" },
+        permissions: [
+          { action: "*", resource: "*", effect: "allow" },
+          { action: "fixture_test_write", resource: "*", effect: "ask" },
+        ],
+      });
+      await client.session.prompt({ sessionID: session.id, text: "Invoke the disposable MCP fixture once." });
+      let pending;
+      await waitFor(async () => {
+        pending = (await client.permission.list({ sessionID: session.id })).find((p) => p.action === "fixture_test_write");
+        return Boolean(pending);
+      }, 30000, "pending MCP permission");
+      const before = readFileSync(join(project, "counter.log"), "utf8");
+      if (before !== "") throw new Error("MCP mutated before approval");
+      await client.permission.reply({ sessionID: session.id, requestID: pending.id, decision });
+      await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30000) });
+      const actual = readFileSync(join(project, "counter.log"), "utf8");
+      const expected = decision === "once" ? `write:${marker}\n` : "";
+      const check = `mcp-${codemode ? "nested" : "direct"}-ask-${decision}`;
+      if (actual === expected) report(check, "PASS", "pending request observed; no pre-approval mutation; exact post-reply counter");
+      else fail(check, `counter=${JSON.stringify(actual)}`);
+      rmSync(join(project, "toolmode"));
+    }
+  } catch (error) {
+    fail("mcp-interactive-permissions", error.message);
+  } finally {
+    server.kill("SIGTERM");
+  }
+}
+{
   // selection through the real binary + gateway: mock-jev picks read (open
   // schema, so delegation must be forced with tool_choice, never direct).
   await rejev("read");
@@ -520,8 +601,8 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   });
   // This verifies an explicit address reaches the intended service; the
   // dead --server run above verifies OpenCode honors (not ignores) the flag.
-  if (api) report("explicit-remote-server", "PASS", "explicit gateway URL serves /health");
-  else fail("explicit-remote-server", "explicit gateway URL unreachable");
+  if (api) report("gateway-health", "PASS", "explicit gateway URL serves /health (not a remote-session test)");
+  else fail("gateway-health", "explicit gateway URL unreachable");
 }
 {
   // Existing shared service: the service runs on its own stub-backed
@@ -641,6 +722,9 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
 } // end if (!blocked): binary-driven scenarios require a usable binary
 
 function printSummary() {
+  for (const name of ALL_CHECKS) {
+    if (!results.some((r) => r.name === name)) fail(name, "required check did not execute");
+  }
   const blockedNames = results.filter((r) => r.status === "BLOCKED").map((r) => r.name);
   // Only documented version-limited checks may stay BLOCKED without failing
   // the gate: 2.0.12 exposes fixture MCP tools on no observable path (see
