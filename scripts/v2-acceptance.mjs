@@ -94,6 +94,15 @@ const httpPost = (port, path, body) =>
     req.on("error", reject);
     req.end(body);
   });
+const httpGet = (port, path) =>
+  new Promise((resolve) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, method: "GET" }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode));
+    });
+    req.on("error", () => resolve(0));
+    req.end();
+  });
 
 const BASE_ENV_KEYS = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TZ", "NO_COLOR", "TERM"];
 function hermeticEnv(iso, extraEnv = {}) {
@@ -233,7 +242,7 @@ const gateway = spawnLogged("gateway", "node", [join(GATEWAY_ROOT, "dist/index.j
 });
 try {
   await waitFor(async () => {
-    try { const r = await httpPost(GW_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
+    try { const r = await httpGet(GW_PORT, "/health"); return r === 200; } catch { return false; }
   }, 60000, "gateway health");
 } catch (e) {
   fail("preflight", `${e.message} gateway-log=${JSON.stringify(gateway.log.join("").slice(-800))}`);
@@ -424,7 +433,7 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   });
   try {
     await waitFor(async () => {
-      try { const r = await httpPost(GW2_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
+      try { const r = await httpGet(GW2_PORT, "/health"); return r === 200; } catch { return false; }
     }, 60000, "gateway2 health");
   } catch (e) {
     fail("preflight", e.message);
