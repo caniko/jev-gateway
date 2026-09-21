@@ -18,6 +18,9 @@ importers:
         specifier: ^4.13.8
         version: 4.13.8
     devDependencies:
+      '@opencode/ai':
+        specifier: 2.0.12
+        version: 2.0.12
       '@types/node':
         specifier: ^22.20.3
         version: 22.20.3
