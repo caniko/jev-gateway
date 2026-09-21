@@ -14,6 +14,7 @@ import {
   TOOL_KEY,
   type ToolPlan,
 } from "./questions.js";
+import { validateDirectArgs } from "./schema.js";
 import { buildState } from "./state.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
 
@@ -191,7 +192,10 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (resolved) {
+  // Schema-sound gate: even a confident closed-set resolution must validate
+  // against the complete schema. Unsupported/mismatched schemas delegate to
+  // the main model (forced/hint), never direct and never a rejection.
+  if (resolved && validateDirectArgs(tool.parameters, resolved.args).ok) {
     return {
       mode: "direct",
       tool: plan.name,
