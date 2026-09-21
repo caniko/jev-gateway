@@ -47,14 +47,16 @@ failures traced to harness bugs (stale gateway config, SIGINT exit-code
 shape, cross-talk measured on a shared stub), all fixed since — the next
 full run re-verifies all 17 checks.
 
-Limits established by probing 2.0.12: MCP fixture tools connect but
-appear neither on the provider wire nor in the Code Mode catalog/search,
-so no deterministic MCP-invocation driver exists here (`mcp-invocation`
-stays BLOCKED); direct mode is unreachable through the binary because
-the native roster has no closed schemas (covered at gateway unit level
-instead); nested Code Mode approvals are unobservable for the same
-reason. Observed 2.0.12 facts this relies on live in `docs/opencode-v2.md`
-on the v2 branch.
+Limits established by probing 2.0.12 with a valid native entry
+(`codemode: false` retained, server connects with 2 tools): fixture
+tools appear neither on the provider wire nor in the Code Mode
+catalog/search nor by direct invocation (`Unknown tool`), with or
+without allow permissions — so no deterministic MCP-invocation driver
+exists here (`mcp-invocation` stays BLOCKED); direct mode is unreachable
+through the binary because the native roster has no closed schemas
+(covered at gateway unit level instead); nested Code Mode approvals are
+unobservable for the same reason. Observed 2.0.12 facts this relies on
+live in `docs/opencode-v2.md` on the v2 branch.
 
 ## B. Real application (gated, disposable)
 
