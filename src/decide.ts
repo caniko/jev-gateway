@@ -197,8 +197,14 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // synthesize; direct-eligible allows direct only when all gates pass.
   // Global directCalls=false always wins. Policies are config-only: MCP
   // descriptions/results cannot change them, and approvals stay authoritative.
-  // Absolute invariant + schema-sound gate also apply (PR1/PR2).
-  const policy = policyFor(plan.name, config.toolPolicies);
+  // Absolute invariant + schema-sound gate also apply (PR1/PR2). A
+  // case-folded roster collision makes the policy identity ambiguous and
+  // resolves to passthrough (see policyFor).
+  const policy = policyFor(
+    plan.name,
+    config.toolPolicies,
+    tools.map((t) => t.name),
+  );
   if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
 
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
