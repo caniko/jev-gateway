@@ -79,7 +79,7 @@ if (failures) process.exit(1);
 const pending = manifest.prs.filter((p) => p.state === "pending");
 for (const p of pending) {
   try {
-    git(["fetch", "origin", `${p.branch}:refs/remotes/sync-origin/${p.branch.replaceAll("/", "_")}`, "--update-head-ok"]);
+    git(["fetch", "origin", `+${p.branch}:refs/remotes/sync-origin/${p.branch.replaceAll("/", "_")}`, "--update-head-ok"]);
   } catch (e) {
     bad(`PR #${p.id}: cannot fetch branch ${p.branch}`);
     continue;
@@ -129,17 +129,39 @@ try {
       bad(`PR #${p.id}: CONFLICT merging ${p.branch} onto ${upstreamHead.slice(0, 12)}`);
     }
   }
-  if (failures) process.exit(1);
+  if (failures) {
+    // process.exit skips finally: record and fall through to cleanup.
+    process.exitCode = 1;
+  } else {
+    // 6. compare candidate vs master outside downstream-only paths ------------
+    const master = git(["rev-parse", "HEAD"]);
+    // No shell quoting here: execFileSync passes argv literally, so quotes
+    // would become part of the pathspec and silently match nothing.
+    const excludes = downstreamOnly.map((p) => `:!${p}`);
+    let diff = "";
+    try {
+      diff = execFileSync("git", ["diff", "--name-only", master, "HEAD", "--", ".", ...excludes], { cwd: candidate, encoding: "utf8" }).trim();
+    } catch (e) {
+      bad(`tree comparison failed: ${String(e.message).slice(0, 160)}`);
+      process.exitCode = 1;
+    }
+    if (!process.exitCode) {
+      if (diff) {
+        bad(`master differs from clean candidate outside downstream-only paths:\n${diff}`);
+      } else {
+        ok(`master matches candidate (upstream ${upstreamHead.slice(0, 12)} + ${ordered.length} pending) outside ${downstreamOnly.length} downstream-only paths`);
+      }
 
-  // 6. compare candidate vs master outside downstream-only paths --------------
-  const master = git(["rev-parse", "HEAD"]);
-  const excludes = downstreamOnly.map((p) => `':!${p}'`);
-  let diff = "";
-  try {
-    diff = execFileSync("git", ["diff", "--name-only", master, "HEAD", "--", ".", ...excludes], { cwd: candidate, encoding: "utf8" }).trim();
-  } catch (e) {
-    bad(`tree comparison failed: ${String(e.message).slice(0, 160)}`);
-    process.exit(1);
+      // 7. ancestry: every remaining head must be in master --------------------
+      for (const p of ordered) {
+        try {
+          git(["merge-base", "--is-ancestor", p._fetched, "HEAD"]);
+          ok(`${p.branch} in master`);
+        } catch {
+          bad(`${p.branch} NOT in master`);
+        }
+      }
+    }
   }
   if (diff) {
     bad(`master differs from clean candidate outside downstream-only paths:\n${diff}`);
@@ -147,19 +169,10 @@ try {
     ok(`master matches candidate (upstream ${upstreamHead.slice(0, 12)} + ${ordered.length} pending) outside ${downstreamOnly.length} downstream-only paths`);
   }
 
-  // 7. ancestry: every remaining head must be in master ------------------------
-  for (const p of ordered) {
-    try {
-      git(["merge-base", "--is-ancestor", p._fetched, "HEAD"]);
-      ok(`${p.branch} in master`);
-    } catch {
-      bad(`${p.branch} NOT in master`);
-    }
-  }
 } finally {
   try { execSync(`git worktree remove --force ${candidate}`, { cwd: ROOT, stdio: "pipe" }); } catch {}
   try { execSync("git worktree prune", { cwd: ROOT, stdio: "pipe" }); } catch {}
 }
 
+if (failures) process.exitCode = 1;
 console.log(failures ? `\nsync ${SYNC ? "sync" : "check"} FAILED (${failures})` : `\nsync ${SYNC ? "sync" : "check"} done: clean`);
-process.exit(failures ? 1 : 0);
