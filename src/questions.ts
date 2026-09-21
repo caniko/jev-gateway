@@ -1,4 +1,5 @@
 import type { Questions } from "@typesafe-ai/sdk";
+import { isDirectEligibleSchema } from "./schema.js";
 import { truncate } from "./state.js";
 import type { Json, JsonSchema, RouterTool } from "./types.js";
 
@@ -53,10 +54,11 @@ function closedParam(name: string, schema: JsonSchema, required: boolean): Close
 
 export function planTool(tool: RouterTool): ToolPlan {
   const schema = tool.parameters;
-  // Only function tools take JSON arguments, and without a recognizable object schema
-  // there is nothing safe to infer about them.
+  // Only function tools take JSON arguments. Missing, malformed, or
+  // unsupported schemas are never an empty-argument tool: they stay
+  // plannable for forced/hint but never direct-eligible.
   if (tool.kind !== "function") return { name: tool.name };
-  if (schema && schema.type !== undefined && schema.type !== "object") return { name: tool.name };
+  if (!isDirectEligibleSchema(schema)) return { name: tool.name };
   const required = new Set(schema?.required ?? []);
   const closedParams: ClosedParam[] = [];
   for (const [name, property] of Object.entries(schema?.properties ?? {})) {
