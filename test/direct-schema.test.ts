@@ -71,6 +71,33 @@ describe("validateDirectArgs", () => {
       validateDirectArgs({ type: "object", properties: { a: { type: ["string", "null"] } } } as any, { a: "x" }).ok,
     ).toBe(false);
   });
+
+  it("rejects unknown keywords and prototype-inherited names", () => {
+    // minProperties is a real constraint the planner would ignore.
+    expect(validateDirectArgs({ type: "object", minProperties: 1 } as any, {}).ok).toBe(false);
+    expect(planTool(closedTool("t", { type: "object", minProperties: 1 } as any)).closedParams).toBeUndefined();
+    // Inherited Object.prototype names must not satisfy required/properties.
+    expect(validateDirectArgs({ type: "object", required: ["toString"] } as any, {}).ok).toBe(false);
+    expect(
+      validateDirectArgs({ type: "object", properties: {}, required: ["toString"] } as any, {
+        toString: "x",
+      } as any).ok,
+    ).toBe(false);
+    // Malformed enum and unknown property type are unsupported, not empty.
+    expect(
+      validateDirectArgs({ type: "object", properties: { a: { enum: "k" } } } as any, { a: "k" }).ok,
+    ).toBe(false);
+    expect(
+      validateDirectArgs({ type: "object", properties: { a: { type: "weird" } } } as any, { a: "k" }).ok,
+    ).toBe(false);
+  });
+
+  it("treats const/type contradictions as mismatches, not coercions", () => {
+    const schema = { type: "object", properties: { a: { type: "string", const: 1 } }, required: ["a"] } as any;
+    expect(validateDirectArgs(schema, { a: 1 }).ok).toBe(false);
+    expect(validateDirectArgs(schema, { a: "1" }).ok).toBe(false);
+    expect(planTool(closedTool("t", schema)).closedParams?.[0]?.kind).toBe("const");
+  });
 });
 
 describe("gateway delegates unsupported schemas instead of direct or reject", () => {

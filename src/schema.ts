@@ -1,68 +1,32 @@
 import type { Json, JsonSchema } from "./types.js";
 
-// Direct mode stays deliberately narrow. This is the complete subset it
-// understands; anything else is unsupported and must delegate to the main
-// model (forced/hint), never synthesize a direct call and never reject the
+// Direct mode stays deliberately narrow. This file defines the COMPLETE
+// subset it understands as explicit allowlists; any other validation
+// keyword is unsupported and must delegate to the main model
+// (forced/hint), never synthesize a direct call and never reject the
 // client request.
 //
-// Supported top-level: { type: "object", properties, required,
-// additionalProperties?: false|true, description?, $schema? }.
-// Supported property: boolean, const, or string/number/integer enum with
-// non-object values and collision-free labels. Any $ref, composition
-// (allOf/anyOf/oneOf/not/if/then/else), patternProperties,
-// dependentSchemas, or numeric/string constraints beyond the closed set
-// makes the schema unsupported for direct mode.
+// Supported top-level keys: type, properties, required,
+// additionalProperties, description, $schema, title.
+// Supported property keys: type, description, const, enum.
+// All ownership checks use hasOwn (never `in`) so prototype-inherited
+// names like "toString" cannot satisfy required/properties.
 
-const UNSUPPORTED_TOP = [
-  "$ref",
-  "$defs",
-  "definitions",
-  "allOf",
-  "anyOf",
-  "oneOf",
-  "not",
-  "if",
-  "then",
-  "else",
-  "dependentSchemas",
-  "patternProperties",
-  "propertyNames",
-] as const;
-
-const UNSUPPORTED_PROP = [
-  "$ref",
-  "allOf",
-  "anyOf",
-  "oneOf",
-  "not",
-  "if",
-  "then",
-  "else",
+const ALLOWED_TOP = new Set([
+  "type",
   "properties",
-  "items",
-  "prefixItems",
+  "required",
   "additionalProperties",
-  "patternProperties",
-  "dependentRequired",
-  "dependentSchemas",
-  "propertyNames",
-  "formatMinimum",
-  "formatMaximum",
-  "minimum",
-  "maximum",
-  "exclusiveMinimum",
-  "exclusiveMaximum",
-  "multipleOf",
-  "minLength",
-  "maxLength",
-  "pattern",
-  "format",
-  "minItems",
-  "maxItems",
-  "uniqueItems",
-  "minProperties",
-  "maxProperties",
-] as const;
+  "description",
+  "$schema",
+  "title",
+]);
+
+const ALLOWED_PROP = new Set(["type", "description", "const", "enum"]);
+
+const KNOWN_TYPES = new Set(["string", "number", "integer", "boolean", "null", "array", "object"]);
+
+const hasOwn = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -79,7 +43,7 @@ function deepEqual(a: Json | unknown, b: Json | unknown): boolean {
     const ka = Object.keys(a);
     const kb = Object.keys(b);
     if (ka.length !== kb.length) return false;
-    return ka.every((k) => k in b && deepEqual((a as any)[k], (b as any)[k]));
+    return ka.every((k) => hasOwn(b, k) && deepEqual((a as any)[k], (b as any)[k]));
   }
   return false;
 }
@@ -108,20 +72,22 @@ function checkType(value: Json, type: string): boolean {
 /** Whether this schema is eligible for direct-mode planning at all. */
 export function isDirectEligibleSchema(schema: JsonSchema | undefined): boolean {
   if (!isObject(schema)) return false;
-  if (schema.type !== "object") return false;
-  for (const k of UNSUPPORTED_TOP) if (k in schema) return false;
-  if (schema.properties !== undefined && !isObject(schema.properties)) return false;
-  if (schema.required !== undefined) {
-    if (!Array.isArray(schema.required) || !schema.required.every((r) => typeof r === "string")) return false;
+  for (const k of Object.keys(schema)) if (!ALLOWED_TOP.has(k)) return false;
+  if (!hasOwn(schema, "type") || (schema as any).type !== "object") return false;
+  if (hasOwn(schema, "properties") && !isObject((schema as any).properties)) return false;
+  if (hasOwn(schema, "required")) {
+    const req = (schema as any).required;
+    if (!Array.isArray(req) || !req.every((r: unknown) => typeof r === "string")) return false;
   }
-  if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== "boolean") {
-    // Object-valued additionalProperties carries constraints planner ignores.
-    return false;
-  }
-  const props = (schema.properties ?? {}) as Record<string, unknown>;
-  for (const [, prop] of Object.entries(props)) {
+  if (hasOwn(schema, "additionalProperties") && typeof (schema as any).additionalProperties !== "boolean") return false;
+  const props = (hasOwn(schema, "properties") ? (schema as any).properties : {}) as Record<string, unknown>;
+  for (const prop of Object.values(props)) {
     if (!isObject(prop)) return false;
-    for (const k of UNSUPPORTED_PROP) if (k in prop) return false;
+    for (const k of Object.keys(prop)) if (!ALLOWED_PROP.has(k)) return false;
+    if (hasOwn(prop, "type")) {
+      const t = (prop as any).type;
+      if (typeof t !== "string" || !KNOWN_TYPES.has(t)) return false;
+    }
   }
   return true;
 }
@@ -137,48 +103,54 @@ export function validateDirectArgs(
   args: Record<string, Json>,
 ): { ok: true } | { ok: false; reason: string } {
   if (!isObject(schema)) return { ok: false, reason: "missing_schema" };
-  if (schema.type !== "object") return { ok: false, reason: "non_object_schema" };
-  for (const k of UNSUPPORTED_TOP) if (k in schema) return { ok: false, reason: `unsupported:${k}` };
-  if (schema.properties !== undefined && !isObject(schema.properties)) return { ok: false, reason: "malformed_properties" };
-  if (schema.required !== undefined) {
-    if (!Array.isArray(schema.required) || !schema.required.every((r) => typeof r === "string"))
+  for (const k of Object.keys(schema)) {
+    if (!ALLOWED_TOP.has(k)) return { ok: false, reason: `unsupported:${k}` };
+  }
+  if (!hasOwn(schema, "type") || (schema as any).type !== "object") return { ok: false, reason: "non_object_schema" };
+  if (hasOwn(schema, "properties") && !isObject((schema as any).properties))
+    return { ok: false, reason: "malformed_properties" };
+  if (hasOwn(schema, "required")) {
+    const req = (schema as any).required;
+    if (!Array.isArray(req) || !req.every((r: unknown) => typeof r === "string"))
       return { ok: false, reason: "malformed_required" };
   }
-  if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== "boolean")
+  if (hasOwn(schema, "additionalProperties") && typeof (schema as any).additionalProperties !== "boolean")
     return { ok: false, reason: "unsupported_additionalProperties" };
 
-  const props = ((schema.properties ?? {}) as Record<string, JsonSchema>);
-  const required = new Set<string>(Array.isArray(schema.required) ? (schema.required as string[]) : []);
+  const props = ((hasOwn(schema, "properties") ? (schema as any).properties : {}) as Record<string, JsonSchema>);
+  const required: string[] = hasOwn(schema, "required") ? ((schema as any).required as string[]) : [];
 
   for (const name of required) {
-    if (!(name in args)) return { ok: false, reason: `missing_required:${name}` };
-    if (!(name in props)) return { ok: false, reason: `required_not_in_properties:${name}` };
+    if (!hasOwn(args, name)) return { ok: false, reason: `missing_required:${name}` };
+    if (!hasOwn(props, name)) return { ok: false, reason: `required_not_in_properties:${name}` };
   }
-  if (schema.additionalProperties === false) {
+  if ((schema as any).additionalProperties === false) {
     for (const name of Object.keys(args)) {
-      if (!(name in props)) return { ok: false, reason: `additional_property:${name}` };
+      if (!hasOwn(props, name)) return { ok: false, reason: `additional_property:${name}` };
     }
   }
   for (const [name, value] of Object.entries(args)) {
-    const prop = props[name];
-    if (!prop || !isObject(prop)) {
-      if (schema.additionalProperties === false) return { ok: false, reason: `additional_property:${name}` };
+    if (!hasOwn(props, name)) {
+      if ((schema as any).additionalProperties === false) return { ok: false, reason: `additional_property:${name}` };
       continue;
     }
-    for (const k of UNSUPPORTED_PROP) if (k in prop) return { ok: false, reason: `unsupported_prop:${name}:${k}` };
-    if ("const" in prop) {
-      if (!deepEqual(value, prop.const as Json)) return { ok: false, reason: `const_mismatch:${name}` };
+    const prop = props[name] as unknown;
+    if (!isObject(prop)) return { ok: false, reason: `malformed_property:${name}` };
+    for (const k of Object.keys(prop)) {
+      if (!ALLOWED_PROP.has(k)) return { ok: false, reason: `unsupported_prop:${name}:${k}` };
     }
-    if (Array.isArray((prop as any).enum)) {
-      const en = (prop as any).enum as unknown[];
+    if (hasOwn(prop, "const")) {
+      if (!deepEqual(value, (prop as any).const as Json)) return { ok: false, reason: `const_mismatch:${name}` };
+    }
+    if (hasOwn(prop, "enum")) {
+      const en = (prop as any).enum;
+      if (!Array.isArray(en)) return { ok: false, reason: `malformed_enum:${name}` };
       if (!en.some((v) => deepEqual(value, v as Json))) return { ok: false, reason: `enum_mismatch:${name}` };
     }
-    const t = (prop as any).type;
-    if (typeof t === "string") {
+    if (hasOwn(prop, "type")) {
+      const t = (prop as any).type;
+      if (typeof t !== "string" || !KNOWN_TYPES.has(t)) return { ok: false, reason: `unsupported_type:${name}` };
       if (!checkType(value, t)) return { ok: false, reason: `type_mismatch:${name}` };
-    } else if (Array.isArray(t)) {
-      // Union types are unsupported for direct synthesis: refuse rather than guess.
-      return { ok: false, reason: `unsupported_union_type:${name}` };
     }
   }
   return { ok: true };
