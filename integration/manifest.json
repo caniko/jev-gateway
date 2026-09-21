@@ -92,7 +92,7 @@
       "id": 23,
       "url": "https://github.com/vinilana/jev-gateway/pull/23",
       "branch": "test/opencode-v2-mcp-acceptance",
-      "headSha": "d7798f1d0e004ad4e03685eb4c47de2ac09758d8",
+      "headSha": "9c219e6417c91e65f0762c1aab3fe951faa66338",
       "dependencies": [
         "fix/routing-context-integrity",
         "feat/multimodal-routing-guard"
