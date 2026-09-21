@@ -33,10 +33,16 @@ was observed to route**:
   is observed to honor it.
 - No capabilities/limits for the gateway model: nothing invented is
   presented as detected.
-- No `codemode` key is honored on MCP servers in 2.0.12 (the published
-  schema omits it and `debug config` silently drops it). Per-server
-  direct exposure is therefore unavailable in the observed version; see
-  Code Mode below.
+- Native `mcp.servers.<name>` objects in project config are **dropped
+  entirely** by 2.0.12 (`debug config` shows no `mcp` key at all); only
+  the flat `mcp.<name>` shape is accepted and normalized internally.
+  Likewise no `codemode` key is honored anywhere (the published schema's
+  `McpLocalConfig` omits it with `additionalProperties: false`, and
+  `debug config` silently drops it). Per-server direct exposure is
+  therefore unavailable in the observed version; see Code Mode below.
+  The v2 web docs describe both shapes, but they do not match the pinned
+  binary or its published schema — re-verify on upgrade before emitting
+  either.
 
 ## Observed wire formats
 
@@ -69,6 +75,43 @@ not claim otherwise. Nested OpenCode permissions remain authoritative.
 Do not set a global Code Mode off switch either: no such supported key
 was observed, and disabling the outer tool would remove the only path
 MCP tools have.
+
+Stronger, verified 2026-09-21 against the pinned binary: a connected
+local MCP fixture (`mcp connected … tools=2` in the server log) is
+exposed **neither** on the provider wire (12 native tools only), **nor**
+in the Code Mode catalog (`search({})` paginated over all 48 entries
+shows no fixture paths), **nor** by direct `tools.<server>.<tool>`
+invocation (`Unknown tool … Use search`). A per-server `codemode: false`
+cannot be expressed (see above). Real MCP execution through 2.0.12 is
+therefore not deterministically drivable here; Blender/FreeCAD workflows
+stay manual until a version observably exposes them.
+
+## v2 plugin integration (`plugin/jev`)
+
+`@opencode/plugin@2.0.12` (integrity `sha512-eUO61AEruyxK6wrL82XhjRuZ5zvoWpLdhzAWbFgoLe3/8IgwrY/4SUKGEou5WgXtzh0zWNDQQqMpaVMe66n8cQ==`).
+The gateway ships a thin plugin directory (`plugin/jev/`, file `index.ts`)
+consumed as a configured local plugin directory:
+
+```jsonc
+{ "plugins": [{ "package": "<gateway>/plugin/jev", "options": { "gatewayUrl": "http://127.0.0.1:8791" } }] }
+```
+
+A bare `.ts` file path is rejected (`plugin path must be a directory`); the
+directory form loads. On each primary agent-loop `context` event the plugin
+asks the gateway's `/router/decide` for the visible tool snapshot and, on a
+confident selection, appends a `[jev-routing]` hint to the system prompt.
+The main model still decides and executes; approvals stay with OpenCode.
+Fail-open always (timeout + catch → untouched request); multimodal content
+skips the gateway call; title/compaction/generate requests are untouched
+(they have separate hooks which this plugin does not register).
+
+Observed 2026-09-21 against the pinned binary: the hint
+(`Jev suggests tool "read" (confidence 0.99)`) appears exactly once in the
+outgoing stub traffic and the session completes. What the plugin cannot do
+by API design (verified in `@opencode/plugin@2.0.12` types: `SessionContext`
+exposes no `result` field): return synthetic direct responses — that
+capability stays in the gateway proxy transport. The plugin holds no MCP
+client, executes nothing, and runs no agent loop.
 
 ## Launcher
 

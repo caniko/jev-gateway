@@ -39,6 +39,7 @@
   "files": [
     "dist",
     "bin",
+    "plugin",
     "scripts/mock-jev.mjs",
     ".env.example",
     "CHANGELOG.md"
