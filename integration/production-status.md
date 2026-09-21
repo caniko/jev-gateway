@@ -11,6 +11,9 @@ Status: **not approved for cutover**. The running host remains OpenCode v1.
   `tools.fixture.test_write`; execution changes the fixture counter once.
 - Both direct and nested adversarial calls under a deny policy are refused
   with zero MCP side effects.
+- Four authenticated server-API permission cases observe pending requests
+  and verify approval/rejection before and after the actual MCP mutation.
+  The final local harness reports 28 PASS, zero FAIL, zero BLOCKED.
 - The earlier "MCP unsupported" claim is retracted. Published Core 2.0.12
   `MCP.tools()` reads the current catalog without waiting for startup;
   `McpTool` reconciles changes after a 100 ms debounce. Instant-response
@@ -80,6 +83,9 @@ vision-provider qualification.
   screenshot gate still needs resolution in its owning workstream.
 - Cold first-request MCP readiness: the bounded warm-up in acceptance is
   not a production startup synchronization mechanism.
+  A pre-prompt `mcp.list` connected-state poll alone passed once and failed
+  on repetition: it does not wait for the tool-registry debounce. The
+  permission tests retain the explicitly documented bounded first turn.
 - Permission-server acceptance now observes real pending MCP requests and
   replies `once`/`reject` in both exposure modes, with zero pre-approval
   mutation and exact final counters. Terminal UI interaction, plugin
