@@ -64,7 +64,6 @@
       "branch": "feat/tool-routing-policies",
       "headSha": "4ddc952e525689c95b8816554a80412720b1d027",
       "dependencies": [
-        "fix/direct-calls-disabled",
         "fix/direct-schema-validation"
       ],
       "state": "pending"
@@ -74,7 +73,9 @@
       "url": "https://github.com/vinilana/jev-gateway/pull/21",
       "branch": "feat/opencode-v2",
       "headSha": "06e807940d469e451bc357ad4ba299916af9b243",
-      "dependencies": [],
+      "dependencies": [
+        "feat/tool-routing-policies"
+      ],
       "state": "pending"
     },
     {
@@ -82,7 +83,9 @@
       "url": "https://github.com/vinilana/jev-gateway/pull/22",
       "branch": "fix/routing-context-integrity",
       "headSha": "4b6a4159ae24d4082c3ccc27ae8c36e03f5b10c2",
-      "dependencies": [],
+      "dependencies": [
+        "feat/opencode-v2"
+      ],
       "state": "pending"
     },
     {
@@ -91,12 +94,8 @@
       "branch": "test/opencode-v2-mcp-acceptance",
       "headSha": "10cd6b83ce3dc9afb02016cf55a552acd5406616",
       "dependencies": [
-        "fix/direct-calls-disabled",
-        "fix/direct-schema-validation",
-        "feat/multimodal-routing-guard",
-        "feat/tool-routing-policies",
-        "feat/opencode-v2",
-        "fix/routing-context-integrity"
+        "fix/routing-context-integrity",
+        "feat/multimodal-routing-guard"
       ],
       "state": "pending"
     }
