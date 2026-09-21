@@ -14,7 +14,7 @@ import {
   TOOL_KEY,
   type ToolPlan,
 } from "./questions.js";
-import { buildState } from "./state.js";
+import { buildState, incompleteRoutingContext } from "./state.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
 
 /** The one Jev call the router makes; injectable so tests need no network. */
@@ -128,6 +128,10 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
 
   const startedAt = performance.now();
   const state = buildState(input, config);
+  // Routing-relevant structured results that cannot be preserved safely
+  // bypass before any Jev call; ordinary text omission still routes.
+  const incomplete = incompleteRoutingContext(state);
+  if (incomplete) return { mode: "passthrough", reason: incomplete };
   let tools = input.tools;
   let shortlistTokens = 0;
   let result: SystemOneResult<Questions>;
