@@ -25,7 +25,7 @@ const claude = clients.claude as LauncherSpec;
 const origin = "http://127.0.0.1:8791";
 const launcherBin = fileURLToPath(new URL("../bin/jev-opencode.mjs", import.meta.url));
 
-const managedEnv = ["JEV_OPENCODE_UPSTREAM_BASE_URL", "JEV_OPENCODE_MODEL", "JEV_CODEX_UPSTREAM_BASE_URL", "JEV_CLAUDE_UPSTREAM_BASE_URL", "CODEX_HOME"] as const;
+const managedEnv = ["JEV_OPENCODE_UPSTREAM_BASE_URL", "JEV_OPENCODE_MODEL", "JEV_CODEX_UPSTREAM_BASE_URL", "JEV_CLAUDE_UPSTREAM_BASE_URL", "CODEX_HOME", "OPENCODE_CONFIG_CONTENT"] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -75,23 +75,45 @@ describe("jev-opencode spec", () => {
   });
 
   it("injects a stable custom-provider config pointing at the gateway, not at TypeSafe", () => {
+    // Shape verified against the pinned binary: 2.0.12 honors `provider`
+    // with `npm`/`options` (see docs/opencode-v2.md). No capabilities or
+    // limits are declared: nothing invented is presented as detected.
     const config = inlineConfig();
     expect(config.$schema).toBe("https://opencode.ai/config.json");
-    // v2 native providers entry.
-    const providers = config.providers["jev-gateway"];
-    expect(providers.package).toBe("@opencode/ai/providers/openai-compatible");
-    expect(providers.settings.baseURL).toBe(`${origin}/v1`);
-    expect(providers.env).toEqual(["OPENAI_API_KEY"]);
-    expect(Object.keys(providers.models)).toEqual(["gpt-5"]);
-    // v1 legacy provider retained for existing users.
+    expect(config.providers).toBeUndefined();
     const provider = config.provider["jev-gateway"];
     expect(provider.npm).toBe("@ai-sdk/openai-compatible");
     expect(provider.options.baseURL).toBe(`${origin}/v1`);
     expect(provider.options.apiKey).toBe("{env:OPENAI_API_KEY}");
+    expect(Object.keys(provider.models)).toEqual(["gpt-5"]);
+    expect(provider.models["gpt-5"]).toEqual({ name: "Jev Gateway (gpt-5)" });
     const raw = JSON.stringify(config);
     expect(raw.toLowerCase()).not.toContain("typesafe");
     expect(raw).not.toContain("/.config/");
     expect(raw).not.toContain("~");
+  });
+
+  it("merges an inherited inline config instead of replacing it", () => {
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      model: "anthropic/claude-sonnet-4-5",
+      mcp: { extra: { type: "local", command: ["x"] } },
+      permission: { edit: "ask" },
+    });
+    // No JEV_OPENCODE_MODEL: the configured provider is preserved.
+    const kept = inlineConfig();
+    expect(kept.model).toBe("anthropic/claude-sonnet-4-5");
+    expect(kept.mcp).toEqual({ extra: { type: "local", command: ["x"] } });
+    expect(kept.permission).toEqual({ edit: "ask" });
+    expect(kept.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
+    // JEV_OPENCODE_MODEL explicitly asks for gateway routing.
+    process.env.JEV_OPENCODE_MODEL = "gpt-5-mini";
+    const forced = inlineConfig();
+    expect(forced.model).toBe("jev-gateway/gpt-5-mini");
+    expect(forced.mcp).toEqual({ extra: { type: "local", command: ["x"] } });
+    // Unreadable inheritance never breaks the launcher.
+    process.env.OPENCODE_CONFIG_CONTENT = "{not json";
+    delete process.env.JEV_OPENCODE_MODEL;
+    expect(inlineConfig().model).toBe("jev-gateway/gpt-5");
   });
 
   it("does not set obsolete v1 experimental flags; Code Mode stays enabled globally", () => {
@@ -121,7 +143,6 @@ describe("jev-opencode spec", () => {
     const jsonBlock = help.slice(help.indexOf("{"), help.lastIndexOf("}") + 1);
     const parsed = JSON.parse(jsonBlock) as any;
     expect(parsed.model).toBe("jev-gateway/gpt-5");
-    expect(parsed.providers["jev-gateway"].settings.baseURL).toBe(`${origin}/v1`);
     expect(parsed.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
     // No raw-JSON shell one-liner: single-quoting breaks on apostrophes in custom model IDs.
     expect(help).not.toContain("OPENCODE_CONFIG_CONTENT='");
@@ -133,7 +154,6 @@ describe("jev-opencode spec", () => {
     process.env.JEV_OPENCODE_MODEL = "o'brien";
     const config = inlineConfig();
     expect(config.model).toBe("jev-gateway/o'brien");
-    expect(Object.keys(config.providers["jev-gateway"].models)).toEqual(["o'brien"]);
     expect(Object.keys(config.provider["jev-gateway"].models)).toEqual(["o'brien"]);
     const help = opencode.configHelp(origin);
     expect(help).not.toContain("OPENCODE_CONFIG_CONTENT='");

@@ -208,7 +208,12 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
 
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (resolved && config.directCalls && policy === "direct-eligible" && validateDirectArgs(tool.parameters, resolved.args).ok) {
+  // Transports that forbid synthetic answers (e.g. stored Responses
+  // sessions) still get selection via forced/hint, never direct.
+  if (
+    resolved && config.directCalls && policy === "direct-eligible" &&
+    validateDirectArgs(tool.parameters, resolved.args).ok && input.allowDirect !== false
+  ) {
     return {
       mode: "direct",
       tool: plan.name,

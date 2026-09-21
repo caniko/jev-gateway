@@ -146,6 +146,10 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
     turns,
     tools: toTools(declaredTools(req)),
     toolChoice: choice === "auto" || choice === "required" ? choice : "decided",
+    // A stored session may later chain from previous_response_id: the
+    // gateway's synthetic direct reply is explicitly unstored, so direct
+    // mode is disabled here while forced/hint delegation still applies.
+    ...(req.store === true ? { allowDirect: false } : {}),
   };
 }
 

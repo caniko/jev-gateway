@@ -4,8 +4,9 @@ import { fakeJev, fakeUpstream, testConfig } from "./helpers.js";
 
 // OpenCode v2 support: pinned CLI 2.0.12 (npm integrity
 // sha512-LwB0LD7LXZbfFDU12KwiUq5nPcjW1BzYpp81UPzEBpeZSNvszKXnTUa3l8JmLi6I6/WtQx/Z/8n2743FyY6lpg==).
-// Validates v2-native provider config, transport safety, and CAD codemode guidance
-// without requiring paid keys or a desktop.
+// Gateway transport safety for the wire shapes 2.0.12 was observed to use
+// (Responses for built-in providers, Chat Completions for openai-compatible
+// custom providers; see docs/opencode-v2.md). No paid keys or desktop needed.
 
 describe("opencode v2 wire safety", () => {
   it("preserves provider fields on forced path and audits ARGS_MODEL", async () => {
@@ -107,6 +108,67 @@ describe("opencode v2 wire safety", () => {
     expect(Object.keys(criteria)).toContain("mcp__home__set_light");
     // Provider namespaces (Responses namespace groups, Codex additional_tools)
     // are qualified as `ns.name` and never forced by bare name (see safety test above).
+  });
+
+  it("disables direct on stored sessions but still delegates selection", async () => {
+    // store:true sessions may later chain from previous_response_id. The
+    // gateway's synthetic direct reply is explicitly unstored, so direct
+    // mode is off here while forced selection still applies.
+    const canned = {
+      tool: { choice: "t" },
+      needs_tool: { noul: 0.95 },
+      "arg:0:on": { noul: 0.99 },
+    };
+    const closed = { type: "function", name: "t", parameters: { type: "object", properties: { on: { type: "boolean" } }, required: ["on"] } };
+    const jev = fakeJev(canned);
+    const upstream = fakeUpstream();
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        input: [{ role: "user", content: "hi" }],
+        tools: [closed],
+        store: true,
+        stream: false,
+      }),
+    });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0]!.body.tool_choice).toEqual({ type: "function", name: "t" });
+
+    // Unstored sessions keep direct, and the synthetic reply cannot poison
+    // a later chain: store:false with previous_response_id:null.
+    const app2 = createApp({ config: testConfig(), askJev: fakeJev(canned).askJev, fetch: fakeUpstream().fetchImpl });
+    const res2 = await app2.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "m", input: [{ role: "user", content: "hi" }], tools: [closed], stream: false }),
+    });
+    expect(res2.headers.get("x-jev-gateway-mode")).toBe("direct");
+    const json = (await res2.json()) as any;
+    expect(json.store).toBe(false);
+    expect(json.previous_response_id).toBeNull();
+  });
+
+  it("routes dynamically declared additional_tools without inventing mappings", async () => {
+    const jev = fakeJev({ tool: { choice: "late_tool" }, needs_tool: { noul: 0.9 } });
+    const upstream = fakeUpstream();
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        input: [
+          { role: "user", content: "hi" },
+          { type: "additional_tools", tools: [{ type: "function", name: "late_tool", parameters: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } }] },
+        ],
+      }),
+    });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(upstream.calls[0]!.body.tool_choice).toEqual({ type: "function", name: "late_tool" });
   });
 
   it("does not generate synthetic response IDs and streams safely", async () => {
