@@ -73,12 +73,24 @@ function hasTruncatedStructured(turns: Turn[]): boolean {
  */
 export function buildState(input: Pick<RouterInput, "system" | "turns">, limits: Limits): { [key: string]: Json } {
   validateLimits(limits);
-  const systemText = truncate(input.system, limits.maxMessageChars);
-
-  // Envelope overhead: the conversation key plus margin for omission
-  // metadata. Kept small deliberately; the final enforcement loop below
-  // drops oldest whole groups if the serialized total still exceeds the
-  // budget, so turn selection stays close to historical behavior.
+  // Fixed envelope reservation: keys plus worst-case omission metadata and
+  // flags, so caps computed against it hold for the serialized total.
+  const ENVELOPE_FIXED = JSON.stringify({
+    assistant_instructions: "",
+    earlier_turns_omitted: 10000000000,
+    truncated_routing_context: true,
+    conversation: [],
+  }).length;
+  let systemText = truncate(input.system, limits.maxMessageChars);
+  // The system prompt itself is bounded: when it alone exceeds the budget
+  // it is clipped to fit and marked, never allowed to silently squeeze out
+  // bounded turns or blow the total.
+  let systemTruncated = false;
+  const maxSystem = Math.max(0, limits.maxStateChars - ENVELOPE_FIXED);
+  if (systemText.length > maxSystem) {
+    systemText = truncate(systemText, maxSystem);
+    systemTruncated = true;
+  }
   const overhead = JSON.stringify({ conversation: [] }).length + 32;
   let budget = limits.maxStateChars - systemText.length - overhead;
 
@@ -121,7 +133,10 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
     if (kept.length > 0) break;
     // Only the newest group may be fitted, and it stays whole: deep-clone
     // (never mutate the caller's turns) and shrink its text fields
-    // proportionally so call/result association survives. Marked explicit.
+    // proportionally so call/result association survives. The target is the
+    // exact envelope, so the serialized total fits the budget. Marked
+    // explicit. (Degenerate budgets below the minimal envelope+markers are
+    // the only exception; integer validation rejects non-positive limits.)
     const clones = g.turns.map((t) => structuredClone(t) as Turn);
     const fields: Array<{ o: Record<string, unknown>; k: string }> = [];
     for (const t of clones) {
@@ -134,11 +149,25 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
     }
     const fieldLen = fields.reduce((s, f) => s + ((f.o[f.k] as string) || "").length, 0);
     const fixed = JSON.stringify(clones).length - fieldLen;
-    const available = budget - fixed;
+    const omittedAfter = input.turns.length - g.turns.length;
+    const envelope = JSON.stringify({
+      ...(systemText ? { assistant_instructions: systemText } : {}),
+      ...(omittedAfter ? { earlier_turns_omitted: omittedAfter } : {}),
+      truncated_routing_context: true,
+      conversation: [],
+    }).length;
+    const available = limits.maxStateChars - envelope - fixed;
+    // When not even scaffolding plus truncation markers fit, keep no turns:
+    // an explicitly flagged empty suffix still fits and bypasses safely.
+    if (available < fields.length * 18) {
+      truncatedNewest = true;
+      kept.unshift({ turns: [], size: 0 });
+      break;
+    }
     if (available < fieldLen) {
       for (const f of fields) {
         const v = f.o[f.k] as string;
-        f.o[f.k] = truncate(v, Math.max(0, Math.floor((v.length * available) / Math.max(1, fieldLen))));
+        f.o[f.k] = truncate(v, Math.max(0, Math.floor((v.length * Math.max(0, available)) / Math.max(1, fieldLen))));
       }
       truncatedNewest = true;
     }
@@ -165,7 +194,9 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
   const result: { [key: string]: Json } = {
     ...(systemText ? { assistant_instructions: systemText } : {}),
     ...(omitted ? { earlier_turns_omitted: omitted } : {}),
-    ...(truncatedNewest || hasTruncatedStructured(conversation) ? { truncated_routing_context: true } : {}),
+    ...(truncatedNewest || systemTruncated || hasTruncatedStructured(conversation)
+      ? { truncated_routing_context: true }
+      : {}),
     conversation,
   };
   return result;

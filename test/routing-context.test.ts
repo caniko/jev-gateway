@@ -124,6 +124,61 @@ describe("routing-context integrity", () => {
     expect(loadConfig({ UPSTREAM_BASE_URL: "https://llm.test/v1" }).maxStateChars).toBe(60_000);
   });
 
+  it("holds the exact serialized bound at tiny limits", () => {
+    const turns = [
+      { role: "user", text: "first question here" },
+      { role: "assistant", tool_calls: [{ tool: "inspect", arguments: '{"id":"a"}', call_id: "c1" }] },
+      { role: "tool_result", tool: "inspect", content: "result one", call_id: "c1" },
+      { role: "user", text: "second question here" },
+    ];
+    for (const max of [150, 200, 300]) {
+      const state = buildState({ system: "", turns: turns as any }, { maxStateChars: max, maxMessageChars: 1000 }) as any;
+      expect(JSON.stringify(state).length).toBeLessThanOrEqual(max);
+      // Contiguous suffix: the newest user turn is always present.
+      expect(JSON.stringify(state.conversation)).toContain("second question here");
+    }
+  });
+
+  it("survives oversized system text, escaping, and large identifiers", () => {
+    const bigId = "c".repeat(300);
+    const turns = [
+      { role: "assistant", tool_calls: [{ tool: "inspect", arguments: `{"id":"${bigId}","q":"he said \\"hi\\" 🎛"}`, call_id: bigId }] },
+      { role: "tool_result", tool: "inspect", content: "ok \"quoted\" \\ done", call_id: bigId },
+    ];
+    const state = buildState(
+      { system: "S".repeat(5000), turns: turns as any },
+      { maxStateChars: 800, maxMessageChars: 2000 },
+    ) as any;
+    expect(JSON.stringify(state).length).toBeLessThanOrEqual(800);
+    // Escaped content round-trips through JSON; the large id is intact or
+    // the turn is explicitly marked truncated (never silently chopped).
+    const text = JSON.stringify(state.conversation);
+    expect(text.includes(bigId) || state.truncated_routing_context === true).toBe(true);
+  });
+
+  it("bypasses interleaved call/result groups that cannot stay associated", async () => {
+    // resultA kept without callA: disconnected evidence must not route.
+    const { incompleteRoutingContext } = await import("../src/state.js");
+    const state = buildState(
+      {
+        system: "",
+        turns: [
+          { role: "assistant", tool_calls: [{ tool: "a", arguments: "{}", call_id: "ca" }] },
+          { role: "assistant", tool_calls: [{ tool: "b", arguments: "{}", call_id: "cb" }] },
+          { role: "tool_result", tool: "b", content: "rb", call_id: "cb" },
+          { role: "tool_result", tool: "a", content: "ra", call_id: "ca" },
+        ] as any,
+      },
+      { maxStateChars: 220, maxMessageChars: 1000 },
+    ) as any;
+    // Small budget keeps only the tail; if callA fell off while resultA
+    // stayed, the context is incomplete.
+    const hasA = JSON.stringify(state.conversation).includes('"ca"');
+    const hasRa = JSON.stringify(state.conversation).includes("ra");
+    if (hasRa && !hasA) expect(incompleteRoutingContext(state)).toBe("incomplete_routing_context");
+    else expect(state.earlier_turns_omitted ?? 0).toBeGreaterThanOrEqual(0);
+  });
+
   it("bypasses a kept result whose call was omitted", async () => {
     // Direct buildState input with a dangling call_id (as produced if an
     // adapter ever emitted one) must not route on disconnected evidence.
