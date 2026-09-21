@@ -16,16 +16,21 @@ const report = (name, status, reason = "") => {
   console.log(`${status} ${name}${reason ? ` (${reason})` : ""}`);
 };
 
-report("gateway unit (vitest)", "PASS", "run via pnpm test test/v2-acceptance.test.ts");
-report("MCP discovery/normalized names", "PASS", "flattened mcp__* vs provider namespaces documented");
-report("direct/selection-only/passthrough/no-tool", "PASS", "stubbed Jev");
-report("multi-turn continuity", "PASS", "single Jev call, single upstream");
-report("image to main model without Jev", "PASS", "multimodal_content bypass");
-report("ask/deny/allow zero side effects", "PASS", "gateway never executes tools; approvals upstream");
-report("no duplicate on retry", "PASS", "one Jev call per request in fixtures");
-report("Code Mode nested approvals", "PASS", "outer execute only; inner tools not selected (documented)");
-report("shared-service isolation", process.env.OPENCODE_V2_BIN ? "PASS" : "BLOCKED", process.env.OPENCODE_V2_BIN ? "binary present" : "set OPENCODE_V2_BIN to pinned 2.0.12 binary");
-report("credentials no leakage", "PASS", "client key forwarded, Jev key never upstream");
+// HONEST STATUS (review correction): this runner does not execute the listed
+// workflows yet, so nothing here may report PASS. Each item is BLOCKED until
+// the executable harness (local MCP fixture + scripted endpoints driven
+// through the pinned OpenCode binary) implements it. The vitest file
+// test/v2-acceptance.test.ts covers gateway-level fixtures only.
+report("gateway unit (vitest)", "BLOCKED", "not executed by this runner; run pnpm test test/v2-acceptance.test.ts");
+report("MCP discovery/normalized names", "BLOCKED", "not implemented: requires local MCP fixture via pinned binary");
+report("direct/selection-only/passthrough/no-tool", "BLOCKED", "not implemented: requires pinned-binary drive");
+report("multi-turn continuity", "BLOCKED", "not implemented: requires pinned-binary drive");
+report("image to main model without Jev", "BLOCKED", "not implemented: requires pinned-binary drive");
+report("ask/deny/allow zero side effects", "BLOCKED", "not implemented: requires side-effect counter fixture");
+report("no duplicate on retry", "BLOCKED", "not implemented: requires retry/cancellation drive");
+report("Code Mode nested approvals", "BLOCKED", "not implemented: requires nested-approval observation");
+report("shared-service isolation", "BLOCKED", "not implemented: requires cold/attached standalone comparison");
+report("credentials no leakage", "BLOCKED", "not implemented: requires sentinel-credential run");
 
 if (process.env.OPENCODE_V2_BIN) {
   const v = spawnSync(process.env.OPENCODE_V2_BIN, ["--version"], { encoding: "utf8", timeout: 15000 });
