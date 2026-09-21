@@ -146,7 +146,7 @@ if (!existsSync(join(GATEWAY_ROOT, "dist/index.js"))) { fail("preflight", `gatew
 
 const { bin, blocked, error } = resolveBinary();
 if (error) { fail("preflight", error); process.exit(1); }
-const ALL_CHECKS = ["binary-version","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","plugin-influence","plugin-fail-open","plugin-only-influence","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
+const ALL_CHECKS = ["binary-version","installed-artifact","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","plugin-influence","plugin-fail-open","plugin-only-influence","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
 if (blocked) {
   // Single exit policy: record BLOCKED for every check and fall through to
   // the strict gate below, which fails on anything but the documented
@@ -227,9 +227,34 @@ async function rejev(script, confidence = "0.95") {
 }
 }
 
-// gateway (built dist) for gateway-in-loop scenarios
+// Installed artifact under test: pack the gateway checkout and install the
+// tarball without dev dependencies. BOTH the gateway server and the plugin
+// run from this installation, never from checkout dist/ or source paths.
 const GW = `http://127.0.0.1:${GW_PORT}/v1`;
-const gateway = spawnLogged("gateway", "node", [join(GATEWAY_ROOT, "dist/index.js")], {
+let packagedPluginDir = "";
+let installedGateway = "";
+let installedDigest = "";
+try {
+  const packDest = join(work, "pack");
+  mkdirSync(packDest, { recursive: true });
+  execFileSync("pnpm", ["pack", "--pack-destination", packDest], { cwd: GATEWAY_ROOT, stdio: "pipe", timeout: 120000 });
+  const tgz = readdirSync(packDest).find((f) => f.endsWith(".tgz"));
+  if (!tgz) throw new Error("no tarball produced");
+  const digest = execFileSync("sha256sum", [join(packDest, tgz)], { encoding: "utf8" }).split(/\s/)[0];
+  installedDigest = `sha256:${digest}`;
+  execFileSync("npm", ["install", "--prefix", join(work, "pkginstall"), "--no-audit", "--no-fund", join(packDest, tgz)],
+    { stdio: "pipe", timeout: 180000 });
+  packagedPluginDir = join(work, "pkginstall/node_modules/jev-gateway/plugin/jev");
+  installedGateway = join(work, "pkginstall/node_modules/jev-gateway/dist/index.js");
+  if (!existsSync(join(packagedPluginDir, "index.ts"))) throw new Error("tarball lacks plugin/jev/index.ts");
+  if (!existsSync(installedGateway)) throw new Error("tarball lacks dist/index.js");
+  report("installed-artifact", "PASS", `tarball ${installedDigest.slice(0, 19)}…, gateway+plugin installed without devDeps`);
+} catch (e) {
+  fail("preflight", `installed artifact setup failed: ${String(e.message ?? e).slice(0, 200)}`);
+  printSummary();
+  process.exit(1);
+}
+const gateway = spawnLogged("gateway", "node", [installedGateway], {
   PORT: String(GW_PORT), UPSTREAM_BASE_URL: `http://127.0.0.1:${MODEL_PORT}/v1`,
   TYPESAFE_BASE_URL: `http://127.0.0.1:${JEV_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
 });
@@ -241,24 +266,6 @@ try {
   fail("preflight", `${e.message} gateway-log=${JSON.stringify(gateway.log.join("").slice(-800))}`);
   printSummary();
   process.exit(1);
-}
-
-// Packaged plugin under test: pack the gateway checkout and install the
-// tarball without dev dependencies, so plugin checks exercise the shipped
-// artifact (including @opencode/plugin resolution) rather than source paths.
-let packagedPluginDir = "";
-try {
-  const packDest = join(work, "pack");
-  mkdirSync(packDest, { recursive: true });
-  execFileSync("pnpm", ["pack", "--pack-destination", packDest], { cwd: GATEWAY_ROOT, stdio: "pipe", timeout: 120000 });
-  const tgz = readdirSync(packDest).find((f) => f.endsWith(".tgz"));
-  if (!tgz) throw new Error("no tarball produced");
-  execFileSync("npm", ["install", "--prefix", join(work, "pkginstall"), "--no-audit", "--no-fund", join(packDest, tgz)],
-    { stdio: "pipe", timeout: 180000 });
-  packagedPluginDir = join(work, "pkginstall/node_modules/jev-gateway/plugin/jev");
-  if (!existsSync(join(packagedPluginDir, "index.ts"))) throw new Error("tarball lacks plugin/jev/index.ts");
-} catch (e) {
-  fail("preflight", `packaged plugin setup failed: ${String(e.message ?? e).slice(0, 200)}`);
 }
 
 // --- scenarios (direct-to-stub) -------------------------------------------
@@ -443,7 +450,7 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   // present exactly the Jev sentinel (dummy values only, isolated temp dir).
   const authLog = join(work, "jev-auth.log");
   const auth = spawnLogged("authshim", "node", [FIX("acceptance-jev-auth.mjs")], { PORT: String(AUTH_PORT), LOG: authLog });
-  const gw2 = spawnLogged("gateway2", "node", [join(GATEWAY_ROOT, "dist/index.js")], {
+  const gw2 = spawnLogged("gateway2", "node", [installedGateway], {
     PORT: String(GW2_PORT), UPSTREAM_BASE_URL: `http://127.0.0.1:${MODEL_PORT}/v1`,
     TYPESAFE_BASE_URL: `http://127.0.0.1:${AUTH_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
   });
