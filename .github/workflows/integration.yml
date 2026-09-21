@@ -33,9 +33,30 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - run: npm pack --dry-run
       - run: node scripts/sync-master.mjs --check
         env:
           # gh needs an explicit token in Actions; read-only PR metadata.
           GH_TOKEN: ${{ github.token }}
       # No npm publish, no release-please, no secrets: integration pushes must
       # never trigger upstream releases. release.yml only runs on main.
+
+  # Real binary acceptance on the integrated candidate: pinned OpenCode CLI
+  # plus loopback model/MCP/Jev fixtures, no keys, no desktop, no publish.
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: node scripts/v2-acceptance.mjs --install-binary
+        # --install-binary fetches only the pinned registry artifact and
+        # verifies its version; BLOCKED (not failure) if unreachable.
