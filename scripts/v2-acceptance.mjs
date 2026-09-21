@@ -236,7 +236,7 @@ try {
     try { const r = await httpPost(GW_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
   }, 60000, "gateway health");
 } catch (e) {
-  fail("preflight", e.message);
+  fail("preflight", `${e.message} gateway-log=${JSON.stringify(gateway.log.join("").slice(-800))}`);
   printSummary();
   process.exit(1);
 }
