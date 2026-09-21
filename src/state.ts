@@ -7,6 +7,7 @@ export type Limits = Pick<Config, "maxStateChars" | "maxMessageChars">;
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   const marker = " …[truncated]… ";
+  if (max < marker.length) return marker.slice(0, Math.max(0, max));
   const keep = Math.max(0, max - marker.length);
   const head = Math.ceil(keep * 0.6);
   return text.slice(0, head) + marker + text.slice(text.length - (keep - head));
@@ -30,6 +31,7 @@ export function validateLimits(limits: Limits): void {
     if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
       throw new Error(`${key} must be a positive integer, got "${String(value)}"`);
   }
+  if (limits.maxStateChars < 64) throw new Error("maxStateChars must be at least 64 to encode a bypass state");
 }
 
 function isToolResult(turn: Turn): boolean {
@@ -199,6 +201,12 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
       : {}),
     conversation,
   };
+  // JSON escaping and immutable identifiers can exceed any raw character
+  // estimate. Never send an oversized or partially identifiable state.
+  // This constant envelope fits every accepted budget and forces bypass.
+  if (JSON.stringify(result).length > limits.maxStateChars) {
+    return { conversation: [], truncated_routing_context: true };
+  }
   return result;
 }
 

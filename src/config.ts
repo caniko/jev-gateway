@@ -103,5 +103,6 @@ export function loadConfig(env: Env = process.env): Config {
     if (!Number.isInteger(value) || value <= 0)
       throw new Error(`${key} must be a positive integer, got "${String(value)}"`);
   }
+  if (config.maxStateChars < 64) throw new Error("JEV_MAX_STATE_CHARS must be at least 64");
   return config;
 }
