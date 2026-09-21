@@ -177,12 +177,14 @@ const writeProject = (providerBase, extra = {}) => {
         models: { "acc-model": { name: "Acceptance Model", tools: true, limit: { context: 100000, output: 8000 } } },
       },
     },
-    mcp: {
+    mcp: { servers: {
       fixture: {
-        type: "local", command: ["node", join(ROOT, "test/fixtures/acceptance-mcp.mjs")], timeout: 30000,
+        type: "local", command: ["node", join(ROOT, "test/fixtures/acceptance-mcp.mjs")],
+        timeout: { startup: 30000, catalog: 30000, execution: 30000 },
+        codemode: false,
         environment: { FIXTURE_COUNTER: join(project, "counter.log") },
       },
-    },
+    } },
     permission: { fixture_test_read: "allow", fixture_test_write: "allow", ...extra.permission },
     ...extra.rest,
   };
@@ -302,10 +304,41 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   if (/mcp connected.*fixture.*tools=2/.test(log))
     report("mcp-connection", "PASS", "server connected fixture with 2 tools (log evidence only)");
   else fail("mcp-connection", "no fixture-tools=2 line in server log");
-  // Invocation through 2.0.12 is NOT demonstrated: fixture tools appear
-  // neither on the provider wire nor in the Code Mode catalog/search in any
-  // observed run (see docs/acceptance.md). Real Blender/FreeCAD runs stay manual.
-  report("mcp-invocation", "BLOCKED", "2.0.12 does not surface fixture MCP tools on wire or catalog; no deterministic driver");
+}
+for (const codemode of [false, true]) for (const denied of [false, true]) {
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { fixture_test_write: denied ? "deny" : "allow" } });
+  const configPath = join(project, "opencode.json");
+  const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+  cfg.mcp.servers.fixture.codemode = codemode;
+  writeFileSync(configPath, JSON.stringify(cfg));
+  const marker = codemode ? "nested-mcp-proof" : "direct-mcp-proof";
+  writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, denied, marker, warmup: configPath })}`);
+  // The first-turn snapshot races MCP startup in v2.0.12. A realistic
+  // response delay lets its debounced catalog update precede continuation.
+  writeFileSync(join(project, "delayms"), "1200");
+  const before = modelLog().length;
+  const result = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "Use the disposable fixture tool once."]);
+  rmSync(join(project, "delayms"));
+  rmSync(join(project, "toolmode"));
+  const counter = readFileSync(join(project, "counter.log"), "utf8");
+  const bodies = modelLog().slice(before).map((e) => JSON.parse(e.body || "{}"));
+  const roster = bodies.flatMap((b) => (b.tools ?? []).map((t) => t.function?.name ?? t.name));
+  const results = bodies.flatMap((b) => b.messages ?? []).filter((m) => m.role === "tool");
+  const discovered = codemode
+    ? results.some((m) => JSON.stringify(m.content).includes("tools.fixture.test_write"))
+    : roster.includes("fixture_test_write");
+  const check = `${codemode ? "mcp-codemode" : "mcp"}-${denied ? "denial" : "invocation"}`;
+  const attempts = bodies.flatMap((b) => b.messages ?? []).flatMap((m) => m.tool_calls ?? []);
+  const attempted = attempts.some((c) => codemode
+    ? c.function?.name === "execute" && c.function.arguments.includes("test_write")
+    : c.function?.name === "fixture_test_write");
+  const refusal = results.some((m) => /not available|Unknown tool|No tool named|denied|not allowed|not currently available/i.test(JSON.stringify(m.content)));
+  const verified = denied ? counter === "" && attempted && refusal : counter === `write:${marker}\n` && discovered;
+  if (result.code === 0 && verified && result.out.includes("acceptance-final-answer")) {
+    report(check, "PASS", denied ? "adversarial call refused; zero MCP side effects" : "actual discovery, one tools/call side effect, final answer");
+  } else {
+    fail(check, `exit=${result.code} discovered=${discovered} counter=${JSON.stringify(counter)} output=${JSON.stringify(result.out.slice(-400))}`);
+  }
 }
 {
   // selection through the real binary + gateway: mock-jev picks read (open
@@ -613,8 +646,7 @@ function printSummary() {
   // the gate: 2.0.12 exposes fixture MCP tools on no observable path (see
   // docs/acceptance.md). Any other BLOCKED (e.g. no usable binary) fails,
   // so a vacuous green run is impossible.
-  const allowedBlocked = new Set(["mcp-invocation"]);
-  const unexpectedBlocked = blockedNames.filter((n) => !allowedBlocked.has(n));
+  const unexpectedBlocked = blockedNames;
   if (unexpectedBlocked.length) {
     console.log(`\nFAIL: unexpected BLOCKED checks: ${unexpectedBlocked.join(", ")}`);
     process.exit(1);
