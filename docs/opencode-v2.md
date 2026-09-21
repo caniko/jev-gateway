@@ -33,15 +33,10 @@ was observed to route**:
   is observed to honor it.
 - No capabilities/limits for the gateway model: nothing invented is
   presented as detected.
-- A minimal native `mcp.servers.<name>` entry (no optional timeout
-  fields) is accepted and normalized by 2.0.12 — including a correctly
-  spelled `codemode: false` — and the server connects
-  (`mcp connected … tools=2`). A numeric `timeout` key causes the entry
-  to be silently dropped in normalized output instead. So the earlier
-  “unsupported” conclusion was premature: configuration is accepted, but
-  the tools still surface nowhere observable (see Code Mode below).
-  Retraction recorded 2026-09-21; the limitation below is release
-  behavior, not a config mistake.
+- Native `mcp.servers.<name>` supports `codemode: false` and structured
+  `timeout: {startup, catalog, execution}` values in milliseconds, as
+  declared by `@opencode/schema@2.0.12`. Both direct and Code Mode MCP
+  execution are exercised by the binary acceptance harness.
 
 ## Observed wire formats
 
@@ -66,27 +61,23 @@ for it stays as a safe fallback).
 
 ## Code Mode (outer execution tool)
 
-MCP tools never appear on the provider wire under 2.0.12 defaults: they
-run inside generated `{ code }` through the `execute` tool, whose catalog
-is discovered at runtime (`search`). Jev therefore never selects inner
-MCP tools; the gateway routes only the outer `execute` selection and must
-not claim otherwise. Nested OpenCode permissions remain authoritative.
-Do not set a global Code Mode off switch either: no such supported key
-was observed, and disabling the outer tool would remove the only path
-MCP tools have.
+With `codemode: false`, the fixture exposes `fixture_test_read` and
+`fixture_test_write` as ordinary provider functions. With Code Mode enabled,
+`search` discovers `tools.fixture.test_write` for invocation inside `execute`.
+OpenCode retains nested permission enforcement. Jev can only select the
+outer execution tool in that mode; it cannot select hidden inner tools.
 
-Verified 2026-09-21 against the pinned binary with a valid native entry
-(`codemode: false` retained, server connected): a connected local MCP
-fixture (`mcp connected … tools=2` in the server log) is exposed
-**neither** on the provider wire (12 native tools only), **nor** in the
-Code Mode catalog (`search({})` paginated over all 48 entries shows no
-fixture paths), **nor** by direct `tools.<server>.<tool>` invocation
-(`Unknown tool 'fx.test_write'`), with or without explicit allow
-permissions. Minimal reproduction: native `mcp.servers.fx` local stdio
-entry with `codemode: false`, no timeout fields; run any prompt; observe
-12 wire tools and the `Unknown tool` result. Real MCP execution through
-2.0.12 is therefore not deterministically drivable here; Blender/FreeCAD
-workflows stay manual until a version observably exposes them.
+**Retraction of the earlier MCP limitation claim:** the instant-response
+stub raced asynchronous MCP startup. In the published 2.0.12 Core source,
+`MCP.tools()` reads the current catalog; `McpTool` initially snapshots it
+and reconciles `ToolsChanged` after a 100 ms debounce. A session that ends
+immediately can therefore expose native tools only. After a harmless first
+tool turn, a realistic bounded response delay allows catalog reconciliation.
+The next request advertises the fixture and executes it exactly once, as
+verified by a counter file. The acceptance harness covers both exposure
+modes and adversarial denied calls. This is a first-turn readiness race,
+not absence of MCP support. Production cold-start readiness still needs
+qualification; never assume the first request includes a pending server.
 
 ## v2 plugin integration (`plugin/jev`)
 

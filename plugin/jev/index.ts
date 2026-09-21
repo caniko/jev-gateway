@@ -145,7 +145,7 @@ export function toolResultText(result: unknown): TextOrOpaque {
  * encoded, never passed through as presumed JSON.
  */
 function encodeArguments(input: unknown): { args: string } | { opaque: true } {
-  const json = safeJson(input ?? {});
+  const json = safeJson(input);
   return json === undefined ? { opaque: true } : { args: json };
 }
 
@@ -180,6 +180,7 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
   const messages: ReadonlyArray<Message> = Array.isArray(event.messages)
     ? (event.messages as ReadonlyArray<Message>)
     : [];
+  if (event.messages !== undefined && !Array.isArray(event.messages)) return { opaque: true };
   if (!Array.isArray(event.messages)) return out.length > 0 ? { messages: out } : {};
   for (const message of messages) {
     // A message without a usable role, or with content that is neither
@@ -187,12 +188,17 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
     // silently dropping part of the conversation.
     if (!isRecord(message) || typeof message.role !== "string") return { opaque: true };
     const role: string = message.role;
+    if (!["system", "user", "assistant", "tool"].includes(role)) return { opaque: true };
     const content = message.content;
     if (typeof content === "string") {
+      if (role === "tool") return { opaque: true };
       out.push({ role, content });
       continue;
     }
     if (!Array.isArray(content)) return { opaque: true };
+    if (role === "tool" && content.some((part) => !isRecord(part) || part.type !== "tool-result")) {
+      return { opaque: true };
+    }
     const texts: string[] = [];
     const calls: NonNullable<ChatMessage["tool_calls"]> = [];
     // Result turns emitted for the current message, so trailing message
@@ -224,6 +230,7 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
         return { opaque: true };
       }
       if (part.type === "tool-call") {
+        if (role !== "assistant" || part.providerExecuted === true) return { opaque: true };
         if (typeof part.id !== "string" || typeof part.name !== "string") return { opaque: true };
         // Namespaced tools route through provider-specific handling the
         // gateway cannot reproduce; bypass rather than strip the namespace.
@@ -234,6 +241,7 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
         continue;
       }
       if (part.type === "tool-result") {
+        if (role !== "tool" || part.providerExecuted === true || part.namespace) return { opaque: true };
         if (typeof part.id !== "string") return { opaque: true };
         const classified = toolResultText((part as { result?: unknown }).result);
         if (!("text" in classified)) return { opaque: true };
