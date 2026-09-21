@@ -44,15 +44,17 @@
       "id": 18,
       "url": "https://github.com/vinilana/jev-gateway/pull/18",
       "branch": "fix/direct-schema-validation",
-      "headSha": "f84cc753f23c0f6f8d3ca1b38d4ddab75994317e",
-      "dependencies": ["fix/direct-calls-disabled"],
+      "headSha": "7f6fe508a81a38415afce21d1f52d3406aefd9c6",
+      "dependencies": [
+        "fix/direct-calls-disabled"
+      ],
       "state": "pending"
     },
     {
       "id": 19,
       "url": "https://github.com/vinilana/jev-gateway/pull/19",
       "branch": "feat/multimodal-routing-guard",
-      "headSha": "3bacb9534463e6bc25ae662cafa17cebbf193595",
+      "headSha": "ab7d6da9b04886f3c4a30a8727c4b1f8554f90fe",
       "dependencies": [],
       "state": "pending"
     },
@@ -60,15 +62,18 @@
       "id": 20,
       "url": "https://github.com/vinilana/jev-gateway/pull/20",
       "branch": "feat/tool-routing-policies",
-      "headSha": "d06021d2dac4570dfa6e6dbecb0e6cd081833c50",
-      "dependencies": ["fix/direct-calls-disabled", "fix/direct-schema-validation"],
+      "headSha": "9013201e3cf0b6baa7cf2df94ece0875354af283",
+      "dependencies": [
+        "fix/direct-calls-disabled",
+        "fix/direct-schema-validation"
+      ],
       "state": "pending"
     },
     {
       "id": 21,
       "url": "https://github.com/vinilana/jev-gateway/pull/21",
       "branch": "feat/opencode-v2",
-      "headSha": "4313f262e4bf01102d7652027d94ec341b57db05",
+      "headSha": "3ad562e9c945c75f731b0ed45e16f6429d83f54c",
       "dependencies": [],
       "state": "pending"
     },
@@ -76,7 +81,7 @@
       "id": 22,
       "url": "https://github.com/vinilana/jev-gateway/pull/22",
       "branch": "fix/routing-context-integrity",
-      "headSha": "227656bd312e7d92ebcf0d18b02eea1196fa33dc",
+      "headSha": "2c8bcbdf4e4a0b578fcd6335e39f8bc430b6a9d6",
       "dependencies": [],
       "state": "pending"
     },
@@ -84,7 +89,7 @@
       "id": 23,
       "url": "https://github.com/vinilana/jev-gateway/pull/23",
       "branch": "test/opencode-v2-mcp-acceptance",
-      "headSha": "a794f7b3849443b03d8e1deadc63e91d9ee4d2b1",
+      "headSha": "10cd6b83ce3dc9afb02016cf55a552acd5406616",
       "dependencies": [
         "fix/direct-calls-disabled",
         "fix/direct-schema-validation",
@@ -95,5 +100,10 @@
       ],
       "state": "pending"
     }
+  ],
+  "downstreamOnly": [
+    "integration/",
+    "scripts/sync-master.mjs",
+    ".github/workflows/integration.yml"
   ]
 }
