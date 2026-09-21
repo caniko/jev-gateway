@@ -25,9 +25,10 @@
 // - --self-test builds throwaway fixture repos exercising squash landing,
 //   descendant retention, stale heads, conflicts, and repeat runs.
 //
-// Candidate commits use per-command `-c user.name/email`: the script never
-// writes operator git identity anywhere (a worktree `git config` would land
-// in the shared repository config).
+// Candidate commits use the ambient operator identity with no overrides (a
+// worktree `git config` would land in the shared repository config, and -c
+// identity overrides trip the identity hooks). They are unreachable temp
+// objects, never pushed.
 //
 // Usage: node scripts/sync-master.mjs --check [--manifest PATH]
 //        node scripts/sync-master.mjs --sync [--manifest PATH]
@@ -51,10 +52,6 @@ const bad = (m) => { failures++; console.log(`FAIL: ${m}`); };
 const info = (m) => console.log(`info: ${m}`);
 
 const git = (args, opts = {}) => execFileSync("git", args, { encoding: "utf8", cwd: ROOT, ...opts }).trim();
-const gitC = (args, opts = {}) =>
-  execFileSync("git", ["-c", "user.name=sync-candidate", "-c", "user.email=sync-candidate@localhost", ...args], {
-    encoding: "utf8", cwd: ROOT, ...opts,
-  }).trim();
 
 function ghPrMeta(repo, id) {
   if (GH_STUB) {
@@ -153,14 +150,15 @@ function runCheck() {
     };
     for (const p of ordered) {
       try {
-        execFileSync("git", ["-c", "user.name=sync-candidate", "-c", "user.email=sync-candidate@localhost",
-          "merge", "--no-ff", "--no-commit", p._fetched], { cwd: candidate, encoding: "utf8", stdio: "pipe" });
+        // Ambient operator identity (no -c overrides): candidate commits are
+        // unreachable temp objects, never pushed; overrides trip the
+        // identity hooks and must not be used.
+        execFileSync("git", ["merge", "--no-ff", "--no-commit", p._fetched], { cwd: candidate, encoding: "utf8", stdio: "pipe" });
         if (!hasMergeHead()) {
           ok(`candidate already contains ${p.branch}`);
           continue;
         }
-        execFileSync("git", ["-c", "user.name=sync-candidate", "-c", "user.email=sync-candidate@localhost",
-          "commit", "--no-edit", "-m", `sync-candidate: merge ${p.branch}`], { cwd: candidate, encoding: "utf8", stdio: "pipe" });
+        execFileSync("git", ["commit", "--no-edit", "-m", `sync-candidate: merge ${p.branch}`], { cwd: candidate, encoding: "utf8", stdio: "pipe" });
         ok(`candidate merged ${p.branch}`);
       } catch (e) {
         if (hasMergeHead()) {
