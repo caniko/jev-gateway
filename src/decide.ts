@@ -199,11 +199,13 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // descriptions/results cannot change them, and approvals stay authoritative.
   // Absolute invariant + schema-sound gate also apply (PR1/PR2). A
   // case-folded roster collision makes the policy identity ambiguous and
-  // resolves to passthrough (see policyFor).
+  // resolves to passthrough (see policyFor). Checked against the original
+  // roster: shortlisting may already have narrowed `tools`, and a colliding
+  // candidate dropped there must still count as ambiguous.
   const policy = policyFor(
     plan.name,
     config.toolPolicies,
-    tools.map((t) => t.name),
+    input.tools.map((t) => t.name),
   );
   if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
 

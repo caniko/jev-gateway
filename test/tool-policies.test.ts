@@ -54,6 +54,12 @@ describe("policy matching", () => {
     expect(policyFor("my_tool", cfg, ["MY_TOOL", "my_tool"])).toBe("passthrough");
   });
 
+  it("rejects explicit null instead of silently defaulting permissive", () => {
+    expect(() => parsePolicyConfig(null)).toThrow();
+    expect(parsePolicyConfig(undefined).default).toBe("direct-eligible");
+    expect(parsePolicyConfig("").default).toBe("direct-eligible");
+  });
+
   it("rejects unknown fields instead of silently defaulting permissive", () => {
     expect(() => parsePolicyConfig({ defualt: "passthrough" } as any)).toThrow();
     expect(() => parsePolicyConfig({ default: "passthrough", rules: [{ match: "t", policy: "allow" }] })).toThrow();
@@ -170,6 +176,24 @@ describe("gateway enforces policies", () => {
     });
     expect(res.headers.get("x-jev-gateway-mode")).toBe("passthrough");
     expect(res.headers.get("x-jev-gateway-reason")).toBe("tool_policy_passthrough");
+  });
+
+  it("keeps passthrough tools in the request on a no-tool decision", async () => {
+    // Jev says no tool is needed while a passthrough-policy tool exists:
+    // the decision delegates unchanged with the roster intact.
+    const tool = closedTool("blender_execute_code");
+    const cfg = testConfig({ toolPolicies: parsePolicyConfig({ default: "passthrough", rules: [] }) });
+    const jev = fakeJev({ tool: { choice: "no_tool_needed" }, needs_tool: { noul: 0.05 }, "arg:0:on": { noul: 0.5 } });
+    const upstream = fakeUpstream();
+    const app = createApp({ config: cfg, askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const body = { model: "m", messages: [{ role: "user", content: "just chat" }], tools: [tool] };
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(["none", "passthrough"]).toContain(res.headers.get("x-jev-gateway-mode"));
+    if (upstream.calls.length) expect(upstream.calls[0]!.body.tools).toEqual(body.tools);
   });
 
   it("unsafe names still bypass via existing guards, unknown tools default passthrough", async () => {

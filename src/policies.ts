@@ -53,7 +53,11 @@ function patternToRegExp(pattern: string): RegExp {
 const hasOwn = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
 
 export function parsePolicyConfig(raw: unknown): PolicyConfig {
-  if (raw === undefined || raw === null || raw === "") return { default: "direct-eligible", rules: [] };
+  // Unset and empty mean "no policy configured" (existing permissive
+  // default). An explicit null is a malformed value and throws instead of
+  // silently becoming permissive.
+  if (raw === undefined || raw === "") return { default: "direct-eligible", rules: [] };
+  if (raw === null) throw new Error("tool policies must be an object, got null");
   const obj: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
   if (typeof obj !== "object" || obj === null || Array.isArray(obj)) throw new Error("tool policies must be an object");
   // Unknown fields are rejected: a typo like {defualt: ...} must throw,
