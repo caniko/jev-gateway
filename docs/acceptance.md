@@ -1,8 +1,8 @@
 # MCP acceptance
 
 Two separated levels. Preceding PRs own their regression tests; this is
-reusable cross-component tooling. Every PASS below corresponds to an
-executed assertion; anything unimplemented reports BLOCKED, never PASS.
+reusable cross-component tooling. Every PASS corresponds to an executed
+assertion; anything unimplemented reports BLOCKED, never PASS.
 
 ## A. Deterministic, binary-driven (`scripts/v2-acceptance.mjs`)
 
@@ -10,40 +10,46 @@ All loopback, no keys, no desktop. Topology:
 
 - `opencode run --standalone` (pinned `@opencode/cli@2.0.12`) →
   scripted model endpoint (`test/fixtures/acceptance-model.mjs`, Chat
-  Completions JSON + Responses SSE) and local MCP stdio fixture
-  (`test/fixtures/acceptance-mcp.mjs`, `test_read` pure / `test_write`
-  appends to a counter file so duplicate invocations are visible).
+  Completions JSON + Responses SSE, optional per-request delay file) and
+  local MCP stdio fixture (`test/fixtures/acceptance-mcp.mjs`,
+  `test_read` pure / `test_write` appends to a counter file).
 - Gateway-in-loop scenarios use the built `dist/` of a checkout given by
   `GATEWAY_ROOT` (default: this repo), with upstream at the stub and Jev
-  at `scripts/mock-jev.mjs`.
+  at `scripts/mock-jev.mjs` (or `test/fixtures/acceptance-jev-auth.mjs`
+  for the credential assertion).
 - Fully isolated identity: fresh `HOME` plus `XDG_CONFIG_HOME`,
   `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` (`HOME`-only
-  isolation still reads the real `~/.config`). Child processes get a
-  hermetic env, never the caller's interactive `OPENCODE_*` variables.
+  isolation still reads the real `~/.config`). Children get a hermetic
+  env, never the caller's interactive `OPENCODE_*` variables.
 
 Binary source: `--binary PATH`, `OPENCODE_V2_BIN`, or `--install-binary`
 (fetches the pinned npm artifact and verifies `--version`; registry
 access only). Without a usable binary every binary-driven check reports
 BLOCKED. `GATEWAY_ROOT` selects the gateway build under test.
 
-Verified 2026-09-21, 11 passed / 0 failed / 0 blocked:
+Current checks (17): version, text roundtrip, native tool call/result
+linkage, MCP connection (server-log evidence that the fixture connected
+with 2 tools), MCP invocation (BLOCKED, see below), selection through
+the real binary + gateway (forced `tool_choice`, tool ran), multi-turn
+continuity, deny/ask safety (no execution either way), image bypass with
+0 Jev calls, both credential directions, standalone isolation, existing
+shared service (own-config-wins, zero cross-talk on a separated stub),
+explicit remote honored, balanced pairs, cancellation with no post-kill
+retries.
 
-- `binary-version`, `text-roundtrip`, `native-tool-loop` (call/result
-  linked by id, final answer), `mcp-discovery` (server log shows the
-  fixture with 2 tools), `multi-turn-continuity` (full history resent,
-  no `previous_response_id`), `deny-write-side-effect-free` (denied
-  native `write` left no file, run completed),
-  `image-bypass-via-gateway` (image reached the model, 0 Jev calls),
-  `credentials-routing` (every stub hit carried the client sentinel,
-  none the Jev sentinel), `standalone-isolation` (private server works;
-  explicit `--server` honored), `explicit-remote-server`,
-  `balanced-tool-execution` (every call has exactly one result).
+Last full run 2026-09-21: 15 passed / 1 failed / 1 blocked; the three
+failures traced to harness bugs (stale gateway config, SIGINT exit-code
+shape, cross-talk measured on a shared stub), all fixed since — the next
+full run re-verifies all 17 checks.
 
-Observed 2.0.12 facts this relies on: custom `openai-compatible`
-providers speak Chat Completions; the built-in `openai` provider speaks
-Responses; MCP tools stay behind the `execute` Code Mode tool and never
-appear on the provider wire; multi-turn resends full history. See
-`docs/opencode-v2.md` on the v2 branch.
+Limits established by probing 2.0.12: MCP fixture tools connect but
+appear neither on the provider wire nor in the Code Mode catalog/search,
+so no deterministic MCP-invocation driver exists here (`mcp-invocation`
+stays BLOCKED); direct mode is unreachable through the binary because
+the native roster has no closed schemas (covered at gateway unit level
+instead); nested Code Mode approvals are unobservable for the same
+reason. Observed 2.0.12 facts this relies on live in `docs/opencode-v2.md`
+on the v2 branch.
 
 ## B. Real application (gated, disposable)
 
