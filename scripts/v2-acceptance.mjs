@@ -14,7 +14,7 @@
 // Every PASS below corresponds to an executed assertion in this process.
 // Usage: node scripts/v2-acceptance.mjs [--install-binary] [--binary PATH] [--keep]
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -215,6 +215,24 @@ await waitFor(async () => {
   try { const r = await httpPost(GW_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
 }, 15000, "gateway health").catch((e) => fail("preflight", e.message));
 
+// Packaged plugin under test: pack the gateway checkout and install the
+// tarball without dev dependencies, so plugin checks exercise the shipped
+// artifact (including @opencode/plugin resolution) rather than source paths.
+let packagedPluginDir = "";
+try {
+  const packDest = join(work, "pack");
+  mkdirSync(packDest, { recursive: true });
+  execFileSync("pnpm", ["pack", "--pack-destination", packDest], { cwd: GATEWAY_ROOT, stdio: "pipe", timeout: 120000 });
+  const tgz = readdirSync(packDest).find((f) => f.endsWith(".tgz"));
+  if (!tgz) throw new Error("no tarball produced");
+  execFileSync("npm", ["install", "--prefix", join(work, "pkginstall"), "--no-audit", "--no-fund", join(packDest, tgz)],
+    { stdio: "pipe", timeout: 180000 });
+  packagedPluginDir = join(work, "pkginstall/node_modules/jev-gateway/plugin/jev");
+  if (!existsSync(join(packagedPluginDir, "index.ts"))) throw new Error("tarball lacks plugin/jev/index.ts");
+} catch (e) {
+  fail("preflight", `packaged plugin setup failed: ${String(e.message ?? e).slice(0, 200)}`);
+}
+
 // --- scenarios (direct-to-stub) -------------------------------------------
 writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 {
@@ -273,15 +291,13 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   else fail("selection-via-opencode", `exit=${r.code} forced=${forced} jevDelta=${jevDelta}`);
 }
 {
-  // Plugin influence + lifecycle through the real binary: the configured
-  // jev-gateway plugin directory must load, run its context hook once per
-  // primary request, and append the routing hint to the outgoing traffic.
-  // mock-jev is scripted to pick `read` so a hint is expected.
-  const pluginDir = process.env.PLUGIN_DIR ?? join(GATEWAY_ROOT, "plugin/jev");
-  if (!existsSync(join(pluginDir, "index.ts"))) {
-    report("plugin-influence", "BLOCKED", `no plugin entrypoint at ${pluginDir}`);
-    report("plugin-fail-open", "BLOCKED", `no plugin entrypoint at ${pluginDir}`);
-  } else {
+  // Plugin influence + lifecycle through the real binary, using the
+  // PACKAGED plugin directory (installed tarball, no dev dependencies).
+  // It must load, run its context hook once per primary request, and
+  // append the routing hint to the outgoing traffic. mock-jev is scripted
+  // to pick `read` so a hint is expected.
+  {
+    const pluginDir = packagedPluginDir;
     await rejev("read");
     writeProject(GW, { rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: GW.replace(/\/v1$/, ""), timeoutMs: 8000 } }] } });
     const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
@@ -346,8 +362,11 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 
 // --- scenarios (gateway in loop) ------------------------------------------
 {
-  // image bypass: provider -> gateway, screenshot attached; Jev must see nothing
-  writeProject(GW);
+  // image bypass: provider -> gateway with the plugin enabled, screenshot
+  // attached. Both the proxy guard and the plugin's multimodal skip must
+  // hold: the image reaches the model while Jev sees zero calls across the
+  // whole session.
+  writeProject(GW, { rest: { plugins: [{ package: packagedPluginDir, options: { gatewayUrl: GW.replace(/\/v1$/, ""), timeoutMs: 8000 } }] } });
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
   writeFileSync(join(project, "shot.png"), png);
   const jevBefore = jevCalls();
@@ -355,6 +374,8 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   const entries = modelLog();
   const sawImage = entries.some((e) => /image_url|input_image|inlineData/.test(e.body ?? ""));
   const jevDelta = jevCalls() - jevBefore;
+  // NOTE: jevDelta===0 is asserted (not just reported): with an image in
+  // the conversation neither the proxy nor the plugin may consult Jev.
   if (r.code === 0 && sawImage && jevDelta === 0 && r.out.includes("acceptance-final-answer"))
     report("image-bypass-via-gateway", "PASS", "image reached model, 0 Jev calls");
   else fail("image-bypass-via-gateway", `exit=${r.code} sawImage=${sawImage} jevDelta=${jevDelta}`);
