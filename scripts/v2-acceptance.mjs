@@ -134,8 +134,8 @@ const cleanup = () => { for (const c of children) try { c.child.kill("SIGKILL");
 process.on("exit", cleanup);
 process.on("SIGINT", () => { cleanup(); process.exit(2); });
 
-const MODEL_PORT = 18081, JEV_PORT = 18090, GW_PORT = 18791;
-for (const p of [MODEL_PORT, JEV_PORT, GW_PORT]) {
+const MODEL_PORT = 18081, JEV_PORT = 18090, GW_PORT = 18791, GW2_PORT = 18792, AUTH_PORT = 18091, MODEL2_PORT = 18083;
+for (const p of [MODEL_PORT, JEV_PORT, GW_PORT, GW2_PORT, AUTH_PORT, MODEL2_PORT]) {
   if (!freePort(p)) { fail("preflight", `loopback port ${p} busy`); process.exit(1); }
 }
 // Gateway under test: an integrated checkout (master after reintegration).
@@ -145,8 +145,9 @@ if (!existsSync(join(GATEWAY_ROOT, "dist/index.js"))) { fail("preflight", `gatew
 
 const { bin, blocked, error } = resolveBinary();
 if (error) { fail("preflight", error); process.exit(1); }
+const ALL_CHECKS = ["binary-version","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
 if (blocked) {
-  for (const name of ["binary-version","text-roundtrip","native-tool-loop","mcp-discovery","image-bypass-via-gateway","deny-write-side-effect-free","credentials-routing","multi-turn-continuity","standalone-isolation","explicit-remote-server","balanced-tool-execution"]) report(name, "BLOCKED", blocked);
+  for (const name of ALL_CHECKS) report(name, "BLOCKED", blocked);
   process.exit(0);
 }
 const ver = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 30000 });
@@ -190,14 +191,22 @@ const FIX = (name) => join(ROOT, "test/fixtures", name);
 // model stub + mock jev stay up for the whole run
 writeFileSync(join(project, "counter.log"), "");
 const model = spawnLogged("model", "node", [FIX("acceptance-model.mjs")],
-  { PORT: String(MODEL_PORT), LOG: join(work, "model-requests.log"), SCENARIO_FILE: join(project, "toolmode") });
-const jev = spawnLogged("jev", "node", [join(ROOT, "scripts/mock-jev.mjs")],
+  { PORT: String(MODEL_PORT), LOG: join(work, "model-requests.log"), SCENARIO_FILE: join(project, "toolmode"), DELAY_FILE: join(project, "delayms") });
+let jev = spawnLogged("jev", "node", [join(ROOT, "scripts/mock-jev.mjs")],
   { MOCK_JEV_PORT: String(JEV_PORT), MOCK_JEV_SCRIPT: "no_tool_needed", MOCK_JEV_CONFIDENCE: "0.95", MOCK_JEV_ARG_CERTAINTY: "0.5" });
 await waitFor(() => model.log.join("").includes(`acceptance-model on 127.0.0.1:${MODEL_PORT}`), 15000, "model stub").catch((e) => fail("preflight", e.message));
 await waitFor(() => jev.log.join("").includes("mock-jev on"), 15000, "mock jev").catch((e) => fail("preflight", e.message));
 const jevCalls = () => jev.log.join("").split("\n").filter((l) => l.includes('"n":')).length;
+// Restart mock-jev with a new script (selection scenarios need picked tools).
+async function rejev(script, confidence = "0.95") {
+  try { jev.child.kill("SIGKILL"); } catch {}
+  jev = spawnLogged("jev", "node", [join(ROOT, "scripts/mock-jev.mjs")],
+    { MOCK_JEV_PORT: String(JEV_PORT), MOCK_JEV_SCRIPT: script, MOCK_JEV_CONFIDENCE: confidence, MOCK_JEV_ARG_CERTAINTY: "0.5" });
+  await waitFor(() => jev.log.join("").includes("mock-jev on"), 15000, "mock jev respawn").catch((e) => fail("preflight", e.message));
+}
 
 // gateway (built dist) for gateway-in-loop scenarios
+const GW = `http://127.0.0.1:${GW_PORT}/v1`;
 const gateway = spawnLogged("gateway", "node", [join(GATEWAY_ROOT, "dist/index.js")], {
   PORT: String(GW_PORT), UPSTREAM_BASE_URL: `http://127.0.0.1:${MODEL_PORT}/v1`,
   TYPESAFE_BASE_URL: `http://127.0.0.1:${JEV_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
@@ -237,8 +246,31 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 {
   const logFile = join(iso.data, "opencode/log/opencode.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
-  if (/mcp connected.*fixture.*tools=2/.test(log)) report("mcp-discovery", "PASS", "server connected fixture with 2 tools");
-  else fail("mcp-discovery", "no fixture-tools=2 line in server log");
+  if (/mcp connected.*fixture.*tools=2/.test(log))
+    report("mcp-connection", "PASS", "server connected fixture with 2 tools (log evidence only)");
+  else fail("mcp-connection", "no fixture-tools=2 line in server log");
+  // Invocation through 2.0.12 is NOT demonstrated: fixture tools appear
+  // neither on the provider wire nor in the Code Mode catalog/search in any
+  // observed run (see docs/acceptance.md). Real Blender/FreeCAD runs stay manual.
+  report("mcp-invocation", "BLOCKED", "2.0.12 does not surface fixture MCP tools on wire or catalog; no deterministic driver");
+}
+{
+  // selection through the real binary + gateway: mock-jev picks read (open
+  // schema, so delegation must be forced with tool_choice, never direct).
+  await rejev("read");
+  writeProject(GW);
+  writeFileSync(join(project, "readable.txt"), "fixture content\n");
+  const jevBefore = jevCalls();
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
+  const entries = modelLog();
+  const forced = entries.some((e) => {
+    try { return JSON.stringify(JSON.parse(e.body).tool_choice ?? "").includes("read"); } catch { return false; }
+  });
+  const jevDelta = jevCalls() - jevBefore;
+  await rejev("no_tool_needed");
+  if (r.code === 0 && forced && jevDelta > 0 && r.out.includes("acceptance-final-answer"))
+    report("selection-via-opencode", "PASS", "Jev selection reached model as forced tool_choice, tool ran");
+  else fail("selection-via-opencode", `exit=${r.code} forced=${forced} jevDelta=${jevDelta}`);
 }
 {
   // multi-turn: continue latest session, assert history grows without server refs
@@ -268,9 +300,20 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   else fail("deny-write-side-effect-free", `exit=${r.code} absent=${absent}`);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 }
+{
+  // ask: interactive approval has no TTY here; the run must still be safe
+  // (no execution) whether it errors or completes.
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { edit: "ask" } });
+  writeFileSync(join(project, "toolmode"), `write {"path":"${join(project, "must-not-exist-ask.txt")}", "content": "x"}`);
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "write the file"]);
+  try { rmSync(join(project, "toolmode")); } catch {}
+  const absent = !existsSync(join(project, "must-not-exist-ask.txt"));
+  if (absent) report("ask-write-safe-default", "PASS", `no TTY approval executed nothing (exit=${r.code})`);
+  else fail("ask-write-safe-default", `exit=${r.code} absent=${absent}`);
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+}
 
 // --- scenarios (gateway in loop) ------------------------------------------
-const GW = `http://127.0.0.1:${GW_PORT}/v1`;
 {
   // image bypass: provider -> gateway, screenshot attached; Jev must see nothing
   writeProject(GW);
@@ -293,6 +336,27 @@ const GW = `http://127.0.0.1:${GW_PORT}/v1`;
   else fail("credentials-routing", "missing client sentinel or leaked jev sentinel in stub log");
 }
 {
+  // Jev-side credential: a dedicated gateway pointed at the auth shim must
+  // present exactly the Jev sentinel (dummy values only, isolated temp dir).
+  const authLog = join(work, "jev-auth.log");
+  const auth = spawnLogged("authshim", "node", [FIX("acceptance-jev-auth.mjs")], { PORT: String(AUTH_PORT), LOG: authLog });
+  const gw2 = spawnLogged("gateway2", "node", [join(GATEWAY_ROOT, "dist/index.js")], {
+    PORT: String(GW2_PORT), UPSTREAM_BASE_URL: `http://127.0.0.1:${MODEL_PORT}/v1`,
+    TYPESAFE_BASE_URL: `http://127.0.0.1:${AUTH_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
+  });
+  await waitFor(async () => {
+    try { const r = await httpPost(GW2_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
+  }, 15000, "gateway2 health").catch((e) => fail("preflight", e.message));
+  writeProject(`http://127.0.0.1:${GW2_PORT}/v1`);
+  await runOpencode(bin, iso, project, ["run", "--standalone", "credential probe"]);
+  try { gw2.child.kill("SIGKILL"); auth.child.kill("SIGKILL"); } catch {}
+  const lines = existsSync(authLog) ? readFileSync(authLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+  const good = lines.length > 0 && lines.every((l) => l.auth === "Bearer jev-sentinel");
+  if (good) report("jev-auth-credential", "PASS", `${lines.length} Jev hits all Bearer jev-sentinel`);
+  else fail("jev-auth-credential", `hits=${lines.length} auths=${JSON.stringify(lines.map((l) => l.auth).slice(0, 3))}`);
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+}
+{
   // standalone isolation: no shared service needed; explicit dead --server fails fast (honored, not ignored)
   spawnSync(bin, ["service", "stop"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "isolation check"]);
@@ -307,6 +371,44 @@ const GW = `http://127.0.0.1:${GW_PORT}/v1`;
   });
   if (api) report("explicit-remote-server", "PASS", "gateway /health reachable at explicit URL");
   else fail("explicit-remote-server", "explicit gateway URL unreachable");
+}
+{
+  // Existing shared service: the service runs on its own stub-backed
+  // project (separate port), so any traffic the dead attached run sends to
+  // the service's stub is unambiguous cross-talk. Observed: an attached run
+  // resolves its own project config and never touches the service endpoint.
+  const model2 = spawnLogged("model2", "node", [FIX("acceptance-model.mjs")],
+    { PORT: String(MODEL2_PORT), LOG: join(work, "model2-requests.log"), SCENARIO_FILE: join(work, "nosuchtoolmode") });
+  await waitFor(() => model2.log.join("").includes(`acceptance-model on 127.0.0.1:${MODEL2_PORT}`), 15000, "model2 stub").catch((e) => fail("preflight", e.message));
+  const model2Log = () => readFileSync(join(work, "model2-requests.log"), "utf8").split("\n").filter(Boolean);
+  const svcCfg = {
+    $schema: "https://opencode.ai/config.json", model: "acc-probe/acc-model", small_model: "acc-probe/acc-model",
+    provider: { "acc-probe": { npm: "@ai-sdk/openai-compatible", name: "Svc",
+      options: { baseURL: `http://127.0.0.1:${MODEL2_PORT}/v1`, apiKey: "k", timeout: 15000 },
+      models: { "acc-model": { name: "Svc", tools: false } } } },
+  };
+  writeFileSync(join(project, "opencode.json"), JSON.stringify(svcCfg, null, 2));
+  spawnSync(bin, ["service", "start"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
+  // Let any straggler traffic from earlier scenarios land before measuring.
+  await sleep(3000);
+  const deadProject = join(work, "deadproject");
+  mkdirSync(deadProject, { recursive: true });
+  const deadCfg = {
+    $schema: "https://opencode.ai/config.json", model: "acc-probe/acc-model", small_model: "acc-probe/acc-model",
+    provider: { "acc-probe": { npm: "@ai-sdk/openai-compatible", name: "Dead",
+      options: { baseURL: "http://127.0.0.1:19999/v1", apiKey: "dead", timeout: 15000 },
+      models: { "acc-model": { name: "Dead", tools: false } } } },
+  };
+  writeFileSync(join(deadProject, "opencode.json"), JSON.stringify(deadCfg));
+  const svcBefore = model2Log().length;
+  const r = await runOpencode(bin, iso, deadProject, ["run", "attached probe"], {}, 90000);
+  const svcAfter = model2Log().length;
+  spawnSync(bin, ["service", "stop"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
+  try { model2.child.kill("SIGKILL"); } catch {}
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+  if (r.code !== 0 && svcAfter === svcBefore)
+    report("shared-service-existing", "PASS", `attached dead-config run failed (exit=${r.code}), 0 service-stub hits`);
+  else fail("shared-service-existing", `exit=${r.code} serviceStubDelta=${svcAfter - svcBefore}`);
 }
 {
   // No duplicate invocation: history legitimately repeats prior calls, so
@@ -342,6 +444,41 @@ const GW = `http://127.0.0.1:${GW_PORT}/v1`;
   }
   if (pairs > 0 && unbalanced === 0) report("balanced-tool-execution", "PASS", `${pairs} call/result pairs balanced, no orphaned or duplicated calls`);
   else fail("balanced-tool-execution", `pairs=${pairs} unbalanced=${unbalanced}`);
+}
+{
+  // Cancellation: with the model delayed past the kill, SIGINT must stop
+  // the run without executing the tool and without later retry traffic.
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+  writeFileSync(join(project, "readable.txt"), "fixture content\n");
+  writeFileSync(join(project, "toolmode"), `read {"path":"${join(project, "readable.txt")}"}`);
+  writeFileSync(join(project, "delayms"), "20000");
+  const before = modelLog().length;
+  const killed = await new Promise((resolve) => {
+    const env = hermeticEnv(iso);
+    const child = spawn(bin, ["run", "--standalone", "--auto", "read the fixture file"],
+      { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d.toString()));
+    // SIGINT only after the first stub hit proves the run is in flight;
+    // node reports SIGINT deaths as code 130 with null signal.
+    const poll = setInterval(() => {
+      if (modelLog().length > before) {
+        clearInterval(poll);
+        setTimeout(() => { try { child.kill("SIGINT"); } catch {} }, 2000);
+      }
+    }, 500);
+    const guard = setTimeout(() => { clearInterval(poll); try { child.kill("SIGKILL"); } catch {} }, 60000);
+    child.on("exit", (code, signal) => { clearInterval(poll); clearTimeout(guard); resolve({ code, signal, out }); });
+  });
+  await sleep(8000);
+  try { rmSync(join(project, "delayms")); rmSync(join(project, "toolmode")); } catch {}
+  const after = modelLog().length;
+  await sleep(1000);
+  const settled = modelLog().length;
+  const sigintDeath = killed.signal === "SIGINT" || killed.code === 130;
+  if (sigintDeath && after > before && settled === after)
+    report("cancellation-no-retry-storm", "PASS", `SIGINT stopped run, stub traffic settled at ${settled - before} (no post-kill retries)`);
+  else fail("cancellation-no-retry-storm", `signal=${killed.signal} code=${killed.code} before=${before} after=${after} settled=${settled}`);
 }
 
 console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${results.filter((r) => r.status === "BLOCKED").length} blocked`);

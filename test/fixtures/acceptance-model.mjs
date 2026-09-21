@@ -13,6 +13,20 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 const PORT = Number(process.env.PORT ?? 18082);
 const LOG = process.env.LOG ?? "./model-requests.log";
 const SCENARIO_FILE = process.env.SCENARIO_FILE ?? "./toolmode";
+// Optional fixed latency before every response (cancellation scenarios).
+// A per-request override file (contents: milliseconds) takes precedence when
+// present, so scenarios can arm delays without restarting the stub.
+const DELAY_MS = Number(process.env.DELAY_MS ?? 0);
+const DELAY_FILE = process.env.DELAY_FILE ?? "";
+const delayNow = () => {
+  if (DELAY_FILE) {
+    try {
+      const v = Number(readFileSync(DELAY_FILE, "utf8").trim());
+      if (Number.isFinite(v) && v >= 0) return v;
+    } catch {}
+  }
+  return DELAY_MS;
+};
 writeFileSync(LOG, "");
 let n = 0;
 
@@ -132,7 +146,8 @@ const chatToolSSE = (name, args) =>
 createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => {
+  req.on("end", () => setTimeout(handle, delayNow()));
+  function handle() {
     n++;
     const auth = req.headers.authorization ?? "";
     const entry = {
@@ -162,5 +177,5 @@ createServer((req, res) => {
     }
     res.writeHead(200, { "content-type": contentType });
     res.end(payload);
-  });
+  }
 }).listen(PORT, "127.0.0.1", () => console.log(`acceptance-model on 127.0.0.1:${PORT}`));
