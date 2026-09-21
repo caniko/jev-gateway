@@ -190,8 +190,12 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // Neither can namespaced ones: backends reject both `tool_choice.namespace` and the bare name.
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
+  // Absolute invariant: when direct calls are disabled, no tool may produce
+  // a synthetic direct response — even empty or const-only plans that need
+  // no argument questions. A confident selection delegates argument
+  // generation upstream via forced/hint instead of skipping the main model.
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (resolved) {
+  if (resolved && config.directCalls) {
     return {
       mode: "direct",
       tool: plan.name,
