@@ -77,23 +77,28 @@ describe("jev-opencode spec", () => {
   it("injects a stable custom-provider config pointing at the gateway, not at TypeSafe", () => {
     const config = inlineConfig();
     expect(config.$schema).toBe("https://opencode.ai/config.json");
+    // v2 native providers entry.
+    const providers = config.providers["jev-gateway"];
+    expect(providers.package).toBe("@opencode/ai/providers/openai-compatible");
+    expect(providers.settings.baseURL).toBe(`${origin}/v1`);
+    expect(providers.env).toEqual(["OPENAI_API_KEY"]);
+    expect(Object.keys(providers.models)).toEqual(["gpt-5"]);
+    // v1 legacy provider retained for existing users.
     const provider = config.provider["jev-gateway"];
-    // Chat Completions path: the gateway already routes POST /v1/chat/completions.
     expect(provider.npm).toBe("@ai-sdk/openai-compatible");
     expect(provider.options.baseURL).toBe(`${origin}/v1`);
-    // The user's own OpenAI credential flows through untouched; never a hardcoded secret.
     expect(provider.options.apiKey).toBe("{env:OPENAI_API_KEY}");
-    expect(Object.keys(provider.models)).toEqual(["gpt-5"]);
     const raw = JSON.stringify(config);
     expect(raw.toLowerCase()).not.toContain("typesafe");
     expect(raw).not.toContain("/.config/");
     expect(raw).not.toContain("~");
   });
 
-  it("keeps the experimental native LLM and code modes disabled for the launched process", () => {
+  it("does not set obsolete v1 experimental flags; Code Mode stays enabled globally", () => {
     const env = opencode.env!(origin);
-    expect(env.OPENCODE_EXPERIMENTAL_NATIVE_LLM).toBe("false");
-    expect(env.OPENCODE_EXPERIMENTAL_CODE_MODE).toBe("false");
+    expect(env.OPENCODE_EXPERIMENTAL_NATIVE_LLM).toBeUndefined();
+    expect(env.OPENCODE_EXPERIMENTAL_CODE_MODE).toBeUndefined();
+    expect(Object.keys(env)).toEqual(["OPENCODE_CONFIG_CONTENT"]);
   });
 
   it("adds no leading client args, so user flags (including -m) forward untouched", () => {
@@ -110,10 +115,13 @@ describe("jev-opencode spec", () => {
     expect(help).toContain("opencode.json");
     expect(help).toContain("jev-opencode --start");
     expect(help).toContain("--model jev-gateway/gpt-5");
+    expect(help).toContain("--standalone");
+    expect(help).toContain("--server");
     // The file workflow below needs no shell quoting; the JSON block must parse as-is.
     const jsonBlock = help.slice(help.indexOf("{"), help.lastIndexOf("}") + 1);
     const parsed = JSON.parse(jsonBlock) as any;
     expect(parsed.model).toBe("jev-gateway/gpt-5");
+    expect(parsed.providers["jev-gateway"].settings.baseURL).toBe(`${origin}/v1`);
     expect(parsed.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
     // No raw-JSON shell one-liner: single-quoting breaks on apostrophes in custom model IDs.
     expect(help).not.toContain("OPENCODE_CONFIG_CONTENT='");
@@ -125,6 +133,7 @@ describe("jev-opencode spec", () => {
     process.env.JEV_OPENCODE_MODEL = "o'brien";
     const config = inlineConfig();
     expect(config.model).toBe("jev-gateway/o'brien");
+    expect(Object.keys(config.providers["jev-gateway"].models)).toEqual(["o'brien"]);
     expect(Object.keys(config.provider["jev-gateway"].models)).toEqual(["o'brien"]);
     const help = opencode.configHelp(origin);
     expect(help).not.toContain("OPENCODE_CONFIG_CONTENT='");
