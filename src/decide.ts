@@ -14,6 +14,7 @@ import {
   TOOL_KEY,
   type ToolPlan,
 } from "./questions.js";
+import { policyFor } from "./policies.js";
 import { validateDirectArgs } from "./schema.js";
 import { buildState } from "./state.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
@@ -191,15 +192,17 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // Neither can namespaced ones: backends reject both `tool_choice.namespace` and the bare name.
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
-  // Absolute invariant: when direct calls are disabled, no tool may produce
-  // a synthetic direct response — even empty or const-only plans that need
-  // no argument questions. A confident selection delegates argument
-  // generation upstream via forced/hint instead of skipping the main model.
-  // Schema-sound gate: even a confident closed-set resolution must validate
-  // against the complete schema. Unsupported/mismatched schemas delegate to
-  // the main model (forced/hint), never direct and never a rejection.
+  // Per-tool policy: passthrough leaves selection+args to the main model
+  // (tools stay in the upstream request); selection-only may select but never
+  // synthesize; direct-eligible allows direct only when all gates pass.
+  // Global directCalls=false always wins. Policies are config-only: MCP
+  // descriptions/results cannot change them, and approvals stay authoritative.
+  // Absolute invariant + schema-sound gate also apply (PR1/PR2).
+  const policy = policyFor(plan.name, config.toolPolicies);
+  if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
+
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (resolved && config.directCalls && validateDirectArgs(tool.parameters, resolved.args).ok) {
+  if (resolved && config.directCalls && policy === "direct-eligible" && validateDirectArgs(tool.parameters, resolved.args).ok) {
     return {
       mode: "direct",
       tool: plan.name,
