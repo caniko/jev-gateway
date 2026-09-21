@@ -49,15 +49,43 @@ owns and cleans up its application processes. Existing user work was not
 selected or edited. A display was available; prior reports claiming no
 graphics support were not supported by this environment.
 
+### Candidate Blender extension and FreeCAD follow-up
+
+`canix cache build .#blender-mcp-extension` realized and privately published
+`/nix/store/dnzwfsv6f789ca3gsp8j8fx4aq43zfp2-blender-mcp-extension-1.18.0`.
+The installed desktop wrapper hardcodes the older extension, so overriding
+its environment did not test the candidate. Launching Blender directly
+with the staged `home/modules/productivity/blender-mcp-startup.py` and the
+candidate extension produced:
+
+- **PASS:** graphical suite, including vector-revision safeguards, in
+  `/data/scratch/tmp/opencode/jev-patched-blender-graphical`.
+- **FAIL:** image gate, now a bounded `no drawable area (-2x26)` error
+  instead of a crash, in `/data/scratch/tmp/opencode/jev-patched-blender-image`.
+  Waiting five seconds for initial redraw did not resolve it; diagnostic
+  evidence: `/data/scratch/tmp/opencode/jev-blender-settled-m9rq5n82`.
+
+A fresh FreeCAD 1.1.3 GUI with installed freecad-mcp 0.1.18 and its addon
+passed MCP document creation, a `Part::Box` operation, exact readback of
+Length=2 mm / Width=3 mm / Height=4 mm, and screenshot capture (3693 bytes).
+Evidence: `/data/scratch/tmp/opencode/jev-freecad-cy6c9ssv`. The isolated
+macro proves PID ownership after binding; existing endpoints are refused.
+The disposable processes were terminated by the driver. This is direct
+application/MCP evidence, not yet an OpenCode/Jev CAD session or a live
+vision-provider qualification.
+
 ## Open production gates
 
-- Verify the staged Canix Blender revision/screenshot fixes in their owning
-  workstream; rerun against the actual candidate package in fresh instances.
+- Blender candidate graphical verification passes; the drawable-viewport
+  screenshot gate still needs resolution in its owning workstream.
 - Cold first-request MCP readiness: the bounded warm-up in acceptance is
   not a production startup synchronization mechanism.
-- Interactive ask/approve/reject, reload/disposal, and controlled mutation
-  cancellation/retry counters remain unqualified.
-- FreeCAD disposable geometry and screenshot workflow has not been run.
+- Permission-server acceptance now observes real pending MCP requests and
+  replies `once`/`reject` in both exposure modes, with zero pre-approval
+  mutation and exact final counters. Terminal UI interaction, plugin
+  reload/disposal, and mutation cancellation/retry counters remain unqualified.
+- FreeCAD direct MCP geometry and screenshot checks pass; the complete
+  v2/gateway/live-model workflow remains unqualified.
 - Live model image interpretation has not been run.
 - The Canix consumer still points to upstream 0.3.1 and does not install
   the new plugin directory. No downstream revision/hash is approved yet.
