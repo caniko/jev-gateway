@@ -1,4 +1,5 @@
 import { PROVIDERS, resolveModel, resolveProvider, resolveUrl, type ProviderId } from "./jev.js";
+import { parsePolicyConfig, type PolicyConfig } from "./policies.js";
 export interface Config {
   /** Interface to listen on. Loopback by default: the gateway forwards credentials and must not be reachable from the LAN. */
   host: string;
@@ -25,6 +26,8 @@ export interface Config {
   argMinCertainty: number;
   onNone: "force_none" | "passthrough";
   directCalls: boolean;
+  /** Per-tool routing policies. Global directCalls=false always wins. */
+  toolPolicies: PolicyConfig;
   /** False starts the gateway as a plain metering proxy; the dashboard can flip it at runtime. */
   routing: boolean;
   maxStateChars: number;
@@ -80,6 +83,9 @@ export function loadConfig(env: Env = process.env): Config {
     argMinCertainty: num(env, "JEV_ARG_MIN_CERTAINTY", 0.8),
     onNone,
     directCalls: bool(env, "JEV_DIRECT_CALLS", true),
+    // Invalid explicit policy must not silently become permissive: parse
+    // throws, failing closed at startup instead of allowing direct.
+    toolPolicies: parsePolicyConfig(str(env, "JEV_TOOL_POLICIES") ?? ""),
     routing: bool(env, "JEV_ROUTING", true),
     maxStateChars: num(env, "JEV_MAX_STATE_CHARS", 60_000),
     maxMessageChars: num(env, "JEV_MAX_MESSAGE_CHARS", 4_000),
