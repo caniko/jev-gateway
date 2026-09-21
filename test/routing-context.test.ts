@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { loadConfig } from "../src/config.js";
 import { buildState } from "../src/state.js";
 import { fakeJev, fakeUpstream, testConfig } from "./helpers.js";
 
@@ -91,12 +92,47 @@ describe("routing-context integrity", () => {
 
   it("bounds oversized newest turn and validates limits", () => {
     expect(() => buildState({ system: "", turns: [] }, { maxStateChars: 0, maxMessageChars: 100 } as any)).toThrow();
+    expect(() => buildState({ system: "", turns: [] }, { maxStateChars: 1.5, maxMessageChars: 100 } as any)).toThrow();
     const state = buildState(
       { system: "", turns: [{ role: "user", text: "x".repeat(5000) }] as any },
       { maxStateChars: 500, maxMessageChars: 5000 },
     ) as any;
     expect(JSON.stringify(state).length).toBeLessThanOrEqual(2000);
     expect(state.conversation).toHaveLength(1);
+  });
+
+  it("keeps the serialized total within budget and never mutates its input", () => {
+    const turns = [
+      { role: "user", text: "q" },
+      { role: "assistant", tool_calls: [{ tool: "inspect", arguments: '{"id":"a"}', call_id: "c1" }] },
+      { role: "tool_result", tool: "inspect", content: "r1", call_id: "c1" },
+      { role: "assistant", tool_calls: [{ tool: "inspect", arguments: '{"id":"b"}', call_id: "c2" }] },
+      { role: "tool_result", tool: "inspect", content: "r2", call_id: "c2" },
+    ];
+    const snapshot = JSON.stringify(turns);
+    const state = buildState({ system: "sys", turns: turns as any }, { maxStateChars: 300, maxMessageChars: 1000 }) as any;
+    expect(JSON.stringify(state).length).toBeLessThanOrEqual(300);
+    expect(JSON.stringify(turns)).toBe(snapshot);
+    // Contiguous suffix: dropping the middle group is never allowed.
+    const texts = JSON.stringify(state.conversation);
+    if (texts.includes("r2")) expect(texts.includes("c2")).toBe(true);
+  });
+
+  it("rejects non-integer state limits at config load", () => {
+    expect(() => loadConfig({ UPSTREAM_BASE_URL: "https://llm.test/v1", JEV_MAX_STATE_CHARS: "0" })).toThrow();
+    expect(() => loadConfig({ UPSTREAM_BASE_URL: "https://llm.test/v1", JEV_MAX_MESSAGE_CHARS: "1.5" })).toThrow();
+    expect(loadConfig({ UPSTREAM_BASE_URL: "https://llm.test/v1" }).maxStateChars).toBe(60_000);
+  });
+
+  it("bypasses a kept result whose call was omitted", async () => {
+    // Direct buildState input with a dangling call_id (as produced if an
+    // adapter ever emitted one) must not route on disconnected evidence.
+    const { incompleteRoutingContext } = await import("../src/state.js");
+    expect(
+      incompleteRoutingContext({
+        conversation: [{ role: "tool_result", tool: "x", content: "orphan", call_id: "missing" }],
+      }),
+    ).toBe("incomplete_routing_context");
   });
 
   it("preserves useful routing for ordinary text with old omission", async () => {

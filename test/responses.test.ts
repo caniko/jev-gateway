@@ -125,8 +125,8 @@ describe("POST /v1/responses", () => {
       assistant_instructions: "You are Codex, a coding agent.\n\n<permissions>sandboxed</permissions>",
       conversation: [
         { role: "user", text: "what does main.py do?" },
-        { role: "assistant", tool_calls: [{ tool: "shell", arguments: '{"command":["ls"]}' }] },
-        { role: "tool_result", tool: "shell", content: "main.py\nREADME.md" },
+        { role: "assistant", tool_calls: [{ tool: "shell", arguments: '{"command":["ls"]}', call_id: "call_1" }] },
+        { role: "tool_result", tool: "shell", content: "main.py\nREADME.md", call_id: "call_1" },
       ],
     });
     const tool = questions.tool!;
@@ -233,10 +233,13 @@ describe("POST /v1/responses", () => {
       conversation: [
         { role: "user", text: "sleep 10 ms, then run echo hi" },
         { role: "assistant", text: "I’ll wait first." },
-        { role: "assistant", tool_calls: [{ tool: "clock.sleep", arguments: '{"duration_ms":10}' }] },
-        { role: "tool_result", tool: "clock.sleep", content: "slept" },
-        { role: "assistant", tool_calls: [{ tool: "exec", arguments: 'text((await tools.exec_command({cmd:"echo hi"})).output);' }] },
-        { role: "tool_result", tool: "exec", content: "Script completed\nOutput:\n\nhi\n" },
+        { role: "assistant", tool_calls: [{ tool: "clock.sleep", arguments: '{"duration_ms":10}', call_id: "call_1" }] },
+        { role: "tool_result", tool: "clock.sleep", content: "slept", call_id: "call_1" },
+        {
+          role: "assistant",
+          tool_calls: [{ tool: "exec", arguments: 'text((await tools.exec_command({cmd:"echo hi"})).output);', call_id: "call_2" }],
+        },
+        { role: "tool_result", tool: "exec", content: "Script completed\nOutput:\n\nhi\n", call_id: "call_2" },
       ],
     });
     expect(upstream.calls[0]!.body.tool_choice).toEqual({ type: "custom", name: "exec" });
