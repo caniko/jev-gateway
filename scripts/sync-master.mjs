@@ -165,7 +165,8 @@ function runCheck() {
           try { execFileSync("git", ["merge", "--abort"], { cwd: candidate, stdio: "pipe" }); } catch {}
           bad(`PR #${p.id}: CONFLICT merging ${p.branch} onto ${upstreamHead.slice(0, 12)}`);
         } else {
-          bad(`PR #${p.id}: merge failed without merge state (${String(e.message).split("\n")[0].slice(0, 160)})`);
+          const detail = [e.stdout, e.stderr].map((s) => (s || "").toString().trim().split("\n")[0]).filter(Boolean).join(" | ").slice(0, 200);
+          bad(`PR #${p.id}: merge failed without merge state (${String(e.message).split("\n")[0].slice(0, 120)}${detail ? ` :: ${detail}` : ""})`);
         }
       }
     }
