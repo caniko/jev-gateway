@@ -60,6 +60,7 @@
     "hono": "^4.13.8"
   },
   "devDependencies": {
+    "@opencode/plugin": "2.0.12",
     "@types/node": "^22.20.3",
     "@typesafe-ai/sdk": "^0.6.0",
     "tsx": "^4.23.13",
