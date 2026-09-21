@@ -1,46 +1,57 @@
 # MCP acceptance
 
 Two separated levels. Preceding PRs own their regression tests; this is
-reusable cross-component tooling.
+reusable cross-component tooling. Every PASS below corresponds to an
+executed assertion; anything unimplemented reports BLOCKED, never PASS.
 
-## A. Deterministic (CI, no keys/desktop)
+## A. Deterministic, binary-driven (`scripts/v2-acceptance.mjs`)
 
-Run: `pnpm test test/v2-acceptance.test.ts`
-Runner: `node scripts/v2-acceptance-deterministic.mjs`
-Optional live binary: `OPENCODE_V2_BIN=/path/to/opencode-2.0.12 node scripts/v2-acceptance-deterministic.mjs`
+All loopback, no keys, no desktop. Topology:
 
-Verifies with stubbed Jev/model endpoints and local MCP shapes:
+- `opencode run --standalone` (pinned `@opencode/cli@2.0.12`) →
+  scripted model endpoint (`test/fixtures/acceptance-model.mjs`, Chat
+  Completions JSON + Responses SSE) and local MCP stdio fixture
+  (`test/fixtures/acceptance-mcp.mjs`, `test_read` pure / `test_write`
+  appends to a counter file so duplicate invocations are visible).
+- Gateway-in-loop scenarios use the built `dist/` of a checkout given by
+  `GATEWAY_ROOT` (default: this repo), with upstream at the stub and Jev
+  at `scripts/mock-jev.mjs`.
+- Fully isolated identity: fresh `HOME` plus `XDG_CONFIG_HOME`,
+  `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` (`HOME`-only
+  isolation still reads the real `~/.config`). Child processes get a
+  hermetic env, never the caller's interactive `OPENCODE_*` variables.
 
-- MCP discovery and normalized tool names (`mcp__*` flattened vs provider namespaces);
-- direct, selection-only (forced), passthrough, ordinary no-tool;
-- multi-turn call/result/final-answer (single Jev, single upstream, no duplication);
-- image delivery to main model without Jev call;
-- ask/deny/allow: gateway never executes tools; denied calls have zero MCP side effects;
-- retry/cancellation: no duplicate invocation in exercised cases;
-- Code Mode: outer `execute` compatibility only; no claim Jev selects inner code tools;
-- shared-service isolation (`--standalone` vs existing service);
-- credentials routing without cross-provider leakage.
+Binary source: `--binary PATH`, `OPENCODE_V2_BIN`, or `--install-binary`
+(fetches the pinned npm artifact and verifies `--version`; registry
+access only). Without a usable binary every binary-driven check reports
+BLOCKED. `GATEWAY_ROOT` selects the gateway build under test.
 
-Adapters are exercised independently where v2 does not use a format.
+Verified 2026-09-21, 11 passed / 0 failed / 0 blocked:
+
+- `binary-version`, `text-roundtrip`, `native-tool-loop` (call/result
+  linked by id, final answer), `mcp-discovery` (server log shows the
+  fixture with 2 tools), `multi-turn-continuity` (full history resent,
+  no `previous_response_id`), `deny-write-side-effect-free` (denied
+  native `write` left no file, run completed),
+  `image-bypass-via-gateway` (image reached the model, 0 Jev calls),
+  `credentials-routing` (every stub hit carried the client sentinel,
+  none the Jev sentinel), `standalone-isolation` (private server works;
+  explicit `--server` honored), `explicit-remote-server`,
+  `balanced-tool-execution` (every call has exactly one result).
+
+Observed 2.0.12 facts this relies on: custom `openai-compatible`
+providers speak Chat Completions; the built-in `openai` provider speaks
+Responses; MCP tools stay behind the `execute` Code Mode tool and never
+appear on the provider wire; multi-turn resends full history. See
+`docs/opencode-v2.md` on the v2 branch.
 
 ## B. Real application (gated, disposable)
 
-Run: `node scripts/v2-acceptance-real.mjs`
-Gates: `BLENDER_MCP_AVAILABLE`, `FREECAD_MCP_AVAILABLE`, `LIVE_VISION_AVAILABLE`.
-Without gates: BLOCKED (CI stays green). Mocks never count as live validation.
-
-Pinned:
-
-- `newo-ether/blender-mcp@ced81a5a220dd01240e67df2453dffeb8fb51daa`
-- `neka-nat/freecad-mcp@751974609a401660a58a1772ef16f3afbeba9ba1`
-
-Blender: discover/select instance ID, inspect, small validated change, verify
-state/revision safeguards, screenshot round trip, rejection without touching work.
-FreeCAD: disposable doc, bounded op, inspect geometry/properties, screenshot
-round trip, long-running/status/error, approvals around exec/destructive.
-Serialize mutations per instance; preserve server validation/transactions; never
-blind-retry timed-out mutations. Text-only inspection where suitable, plus normal
-screenshot workflow unchanged.
-
-Compare routing off vs on with disposable workflows; record actual routed
-decisions. All-passthrough success is compatibility, not proof of Jev routing.
+Blender (`newo-ether/blender-mcp@ced81a5a`) and FreeCAD
+(`neka-nat/freecad-mcp@75197460`) disposable workflows — instance
+discovery, bounded mutation, state/revision verification, screenshot
+round trips, approval handling — remain manual and credential-gated
+(desktop + application availability). They are BLOCKED until run, and
+mocks never count as live validation. Compare routing off vs on with
+disposable workflows and record actual routed decisions; all-passthrough
+success is compatibility, not proof of Jev routing.

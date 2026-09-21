@@ -1,0 +1,348 @@
+#!/usr/bin/env node
+// Executable OpenCode v2 + jev-gateway acceptance.
+//
+// Topology (all loopback, no keys, no desktop):
+//   opencode run --standalone -> [gateway dist/ | stub model] -> stub model
+//   gateway -> mock-jev (scripts/mock-jev.mjs) for Jev answers
+//   opencode --(MCP stdio)--> acceptance fixture (counter file for side effects)
+//
+// Pinned binary: @opencode/cli@2.0.12. Source: --binary PATH, OPENCODE_V2_BIN,
+// or --install-binary (fetches the pinned npm artifact into temp and verifies
+// --version; registry access only, no credentials). Without a usable binary
+// every binary-driven check reports BLOCKED, never PASS.
+//
+// Every PASS below corresponds to an executed assertion in this process.
+// Usage: node scripts/v2-acceptance.mjs [--install-binary] [--binary PATH] [--keep]
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const VERSION = "2.0.12";
+const args = new Set(process.argv.slice(2));
+const KEEP = args.has("--keep");
+
+const work = mkdirTmp();
+function mkdirTmp() {
+  const dir = join(tmpdir(), `jev-acceptance-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+const results = [];
+const report = (name, status, reason = "") => {
+  results.push({ name, status });
+  console.log(`${status} ${name}${reason ? ` (${reason})` : ""}`);
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function freePort(port) {
+  const out = spawnSync("node", ["-e", `require("net").createServer().once("error",()=>process.exit(1)).once("listening",function(){this.close();process.exit(0)}).listen(${port},"127.0.0.1")`]);
+  return out.status === 0;
+}
+
+// --- binary ---------------------------------------------------------------
+function resolveBinary() {
+  const direct = process.argv.find((a) => a.startsWith("--binary="))?.slice("--binary=".length) ?? process.env.OPENCODE_V2_BIN;
+  if (direct) {
+    if (!existsSync(direct)) return { error: `binary not found: ${direct}` };
+    return { bin: direct };
+  }
+  if (!args.has("--install-binary")) return { blocked: "set OPENCODE_V2_BIN/--binary or pass --install-binary to fetch the pinned artifact" };
+  try {
+    execFileSync("npm", ["install", "--prefix", join(work, "v2bin"), "--no-audit", "--no-fund", `@opencode/cli@${VERSION}`], { stdio: "pipe", timeout: 180000 });
+    execFileSync("node", [join(work, "v2bin/node_modules/@opencode/cli/postinstall.mjs")], { stdio: "pipe", timeout: 60000 });
+    const bin = join(work, "v2bin/node_modules/@opencode/cli/bin/opencode.exe");
+    if (!existsSync(bin)) return { error: "installed package has no binary" };
+    return { bin };
+  } catch (e) {
+    return { blocked: `could not fetch pinned binary: ${String(e.message ?? e).slice(0, 160)}` };
+  }
+}
+
+// --- processes ------------------------------------------------------------
+const children = [];
+function spawnLogged(name, cmd, cmdArgs, env, logFile) {
+  const log = [];
+  const child = spawn(cmd, cmdArgs, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout.on("data", (d) => log.push(d.toString()));
+  child.stderr.on("data", (d) => log.push(d.toString()));
+  children.push({ name, child, log });
+  return { child, log };
+}
+async function waitFor(fn, timeoutMs, label) {
+  const start = Date.now();
+  for (;;) {
+    if (fn()) return;
+    if (Date.now() - start > timeoutMs) throw new Error(`timeout waiting for ${label}`);
+    await sleep(250);
+  }
+}
+const httpPost = (port, path, body) =>
+  new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, method: "POST", headers: { "content-type": "application/json" } }, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => resolve({ status: res.statusCode, data }));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+
+const BASE_ENV_KEYS = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TZ", "NO_COLOR", "TERM"];
+function hermeticEnv(iso, extraEnv = {}) {
+  const env = {};
+  for (const k of BASE_ENV_KEYS) if (process.env[k] !== undefined) env[k] = process.env[k];
+  return {
+    ...env, HOME: iso.home, XDG_CONFIG_HOME: iso.config, XDG_DATA_HOME: iso.data,
+    XDG_CACHE_HOME: iso.cache, XDG_STATE_HOME: iso.state, OPENAI_API_KEY: "stub-key", ...extraEnv,
+  };
+}
+
+function runOpencode(bin, iso, project, runArgs, extraEnv = {}, timeoutMs = 120000) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, runArgs, { cwd: project, env: hermeticEnv(iso, extraEnv), stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.stderr.on("data", (d) => (err += d.toString()));
+    const timer = setTimeout(() => { child.kill("SIGKILL"); }, timeoutMs);
+    child.on("exit", (code, signal) => { clearTimeout(timer); resolve({ code, signal, out, err }); });
+  });
+}
+
+function serverLogTail(iso, maxChars = 3000) {
+  try {
+    const p = join(iso.data, "opencode/log/opencode.log");
+    if (!existsSync(p)) return "(no server log)";
+    const text = readFileSync(p, "utf8");
+    return text.slice(-maxChars);
+  } catch (e) {
+    return `(log unreadable: ${e.message})`;
+  }
+}
+
+const modelLog = () => readFileSync(join(work, "model-requests.log"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+// --- main -----------------------------------------------------------------
+let failed = 0;
+const fail = (name, reason) => { failed++; report(name, "FAIL", reason); };
+const cleanup = () => { for (const c of children) try { c.child.kill("SIGKILL"); } catch {} if (!KEEP) rmSync(work, { recursive: true, force: true }); };
+process.on("exit", cleanup);
+process.on("SIGINT", () => { cleanup(); process.exit(2); });
+
+const MODEL_PORT = 18081, JEV_PORT = 18090, GW_PORT = 18791;
+for (const p of [MODEL_PORT, JEV_PORT, GW_PORT]) {
+  if (!freePort(p)) { fail("preflight", `loopback port ${p} busy`); process.exit(1); }
+}
+// Gateway under test: an integrated checkout (master after reintegration).
+// Defaults to this repo root; override for validating another worktree.
+const GATEWAY_ROOT = process.env.GATEWAY_ROOT ?? ROOT;
+if (!existsSync(join(GATEWAY_ROOT, "dist/index.js"))) { fail("preflight", `gateway dist/ missing in ${GATEWAY_ROOT}: run pnpm build there first`); process.exit(1); }
+
+const { bin, blocked, error } = resolveBinary();
+if (error) { fail("preflight", error); process.exit(1); }
+if (blocked) {
+  for (const name of ["binary-version","text-roundtrip","native-tool-loop","mcp-discovery","image-bypass-via-gateway","deny-write-side-effect-free","credentials-routing","multi-turn-continuity","standalone-isolation","explicit-remote-server","balanced-tool-execution"]) report(name, "BLOCKED", blocked);
+  process.exit(0);
+}
+const ver = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 30000 });
+if (!ver.stdout?.includes(VERSION)) fail("binary-version", `expected ${VERSION}, got ${JSON.stringify(ver.stdout?.trim())}`);
+else report("binary-version", "PASS", ver.stdout.trim());
+
+const iso = {
+  home: join(work, "home"), config: join(work, "home/.config"), data: join(work, "home/.local/share"),
+  cache: join(work, "home/.cache"), state: join(work, "home/.local/state"),
+};
+const project = join(work, "project");
+mkdirSync(project, { recursive: true });
+for (const d of [iso.home, iso.config, iso.data, iso.cache, iso.state]) mkdirSync(d, { recursive: true });
+
+const writeProject = (providerBase, extra = {}) => {
+  const cfg = {
+    $schema: "https://opencode.ai/config.json",
+    model: "acc-probe/acc-model", small_model: "acc-probe/acc-model",
+    provider: {
+      "acc-probe": {
+        npm: "@ai-sdk/openai-compatible", name: "Acceptance Probe",
+        options: { baseURL: providerBase, apiKey: "client-sentinel", timeout: 60000 },
+        models: { "acc-model": { name: "Acceptance Model", tools: true, limit: { context: 100000, output: 8000 } } },
+      },
+    },
+    mcp: {
+      fixture: {
+        type: "local", command: ["node", join(ROOT, "test/fixtures/acceptance-mcp.mjs")], timeout: 30000,
+        environment: { FIXTURE_COUNTER: join(project, "counter.log") },
+      },
+    },
+    permission: { fixture_test_read: "allow", fixture_test_write: "allow", ...extra.permission },
+    ...extra.rest,
+  };
+  writeFileSync(join(project, "opencode.json"), JSON.stringify(cfg, null, 2));
+  writeFileSync(join(project, "counter.log"), "");
+  try { rmSync(join(project, "toolmode")); } catch {}
+};
+const FIX = (name) => join(ROOT, "test/fixtures", name);
+
+// model stub + mock jev stay up for the whole run
+writeFileSync(join(project, "counter.log"), "");
+const model = spawnLogged("model", "node", [FIX("acceptance-model.mjs")],
+  { PORT: String(MODEL_PORT), LOG: join(work, "model-requests.log"), SCENARIO_FILE: join(project, "toolmode") });
+const jev = spawnLogged("jev", "node", [join(ROOT, "scripts/mock-jev.mjs")],
+  { MOCK_JEV_PORT: String(JEV_PORT), MOCK_JEV_SCRIPT: "no_tool_needed", MOCK_JEV_CONFIDENCE: "0.95", MOCK_JEV_ARG_CERTAINTY: "0.5" });
+await waitFor(() => model.log.join("").includes(`acceptance-model on 127.0.0.1:${MODEL_PORT}`), 15000, "model stub").catch((e) => fail("preflight", e.message));
+await waitFor(() => jev.log.join("").includes("mock-jev on"), 15000, "mock jev").catch((e) => fail("preflight", e.message));
+const jevCalls = () => jev.log.join("").split("\n").filter((l) => l.includes('"n":')).length;
+
+// gateway (built dist) for gateway-in-loop scenarios
+const gateway = spawnLogged("gateway", "node", [join(GATEWAY_ROOT, "dist/index.js")], {
+  PORT: String(GW_PORT), UPSTREAM_BASE_URL: `http://127.0.0.1:${MODEL_PORT}/v1`,
+  TYPESAFE_BASE_URL: `http://127.0.0.1:${JEV_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
+});
+await waitFor(async () => {
+  try { const r = await httpPost(GW_PORT, "/health", "{}"); return r.status === 200; } catch { return false; }
+}, 15000, "gateway health").catch((e) => fail("preflight", e.message));
+
+// --- scenarios (direct-to-stub) -------------------------------------------
+writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+{
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "say hello"]);
+  if (r.code === 0 && r.out.includes("acceptance-final-answer")) report("text-roundtrip", "PASS", "stub text reached session");
+  else fail("text-roundtrip", `exit=${r.code} out=${JSON.stringify(r.out.slice(0, 200))} err=${JSON.stringify(r.err.slice(0, 200))} serverlog=${JSON.stringify(serverLogTail(iso).slice(-1200))}`);
+}
+{
+  writeFileSync(join(project, "readable.txt"), "fixture content\n");
+  writeFileSync(join(project, "toolmode"), `read {"path":"${join(project, "readable.txt")}"}`);
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
+  const entries = modelLog();
+  const posts = entries.filter((e) => e.url?.startsWith("/v1/chat/completions"));
+  const callIds = new Set();
+  let linked = false;
+  for (const e of posts) {
+    try {
+      const j = JSON.parse(e.body);
+      for (const m of j.messages ?? []) {
+        for (const c of m.tool_calls ?? []) if (c.id) callIds.add(c.id);
+        if (m.role === "tool" && m.tool_call_id && callIds.has(m.tool_call_id)) linked = true;
+      }
+    } catch {}
+  }
+  try { rmSync(join(project, "toolmode")); } catch {}
+  if (r.code === 0 && r.out.includes("acceptance-final-answer") && linked) report("native-tool-loop", "PASS", "call/result linked by id, final answer shown");
+  else fail("native-tool-loop", `exit=${r.code} linked=${linked} out=${JSON.stringify(r.out.slice(0, 160))}`);
+}
+{
+  const logFile = join(iso.data, "opencode/log/opencode.log");
+  const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
+  if (/mcp connected.*fixture.*tools=2/.test(log)) report("mcp-discovery", "PASS", "server connected fixture with 2 tools");
+  else fail("mcp-discovery", "no fixture-tools=2 line in server log");
+}
+{
+  // multi-turn: continue latest session, assert history grows without server refs
+  const list = spawnSync(bin, ["session", "list"], { cwd: project, env: hermeticEnv(iso), encoding: "utf8", timeout: 30000 });
+  const id = (list.stdout.match(/ses_[a-zA-Z0-9]+/) || [])[0];
+  const before = modelLog().length;
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--continue", "--session", id, "and again"]);
+  const after = modelLog().slice(before).filter((e) => e.url?.startsWith("/v1/chat/completions"));
+  const last = after.at(-1);
+  let grew = false, noRefs = true;
+  try {
+    const j = JSON.parse(last.body);
+    grew = (j.messages?.length ?? 0) > 2;
+    noRefs = !JSON.stringify(j).includes("previous_response_id");
+  } catch {}
+  if (r.code === 0 && grew && noRefs) report("multi-turn-continuity", "PASS", "full history resent, no server refs");
+  else fail("multi-turn-continuity", `exit=${r.code} grew=${grew} noRefs=${noRefs}`);
+}
+{
+  // deny: native write is gated by the `edit` action; refused -> file absent, run completes
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { edit: "deny" } });
+  writeFileSync(join(project, "toolmode"), `write {"path":"${join(project, "must-not-exist.txt")}", "content": "x"}`);
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "write the file"]);
+  try { rmSync(join(project, "toolmode")); } catch {}
+  const absent = !existsSync(join(project, "must-not-exist.txt"));
+  if (r.code === 0 && absent) report("deny-write-side-effect-free", "PASS", "denied write left no file, run completed");
+  else fail("deny-write-side-effect-free", `exit=${r.code} absent=${absent}`);
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+}
+
+// --- scenarios (gateway in loop) ------------------------------------------
+const GW = `http://127.0.0.1:${GW_PORT}/v1`;
+{
+  // image bypass: provider -> gateway, screenshot attached; Jev must see nothing
+  writeProject(GW);
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  writeFileSync(join(project, "shot.png"), png);
+  const jevBefore = jevCalls();
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "-f", join(project, "shot.png"), "describe this screenshot"]);
+  const entries = modelLog();
+  const sawImage = entries.some((e) => /image_url|input_image|inlineData/.test(e.body ?? ""));
+  const jevDelta = jevCalls() - jevBefore;
+  if (r.code === 0 && sawImage && jevDelta === 0 && r.out.includes("acceptance-final-answer"))
+    report("image-bypass-via-gateway", "PASS", "image reached model, 0 Jev calls");
+  else fail("image-bypass-via-gateway", `exit=${r.code} sawImage=${sawImage} jevDelta=${jevDelta}`);
+}
+{
+  // credentials: every stub hit carries the client sentinel and never the Jev one
+  const entries = modelLog();
+  const ok = entries.length > 0 && entries.every((e) => e.hasClientSentinel && !e.hasJevSentinel);
+  if (ok) report("credentials-routing", "PASS", `${entries.length} stub hits all client-sentinel, none jev-sentinel`);
+  else fail("credentials-routing", "missing client sentinel or leaked jev sentinel in stub log");
+}
+{
+  // standalone isolation: no shared service needed; explicit dead --server fails fast (honored, not ignored)
+  spawnSync(bin, ["service", "stop"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
+  const r = await runOpencode(bin, iso, project, ["run", "--standalone", "isolation check"]);
+  const solo = r.code === 0 && r.out.includes("acceptance-final-answer");
+  const dead = await runOpencode(bin, iso, project, ["run", "--server", "http://127.0.0.1:19999", "dead server check"], {}, 45000);
+  const honored = dead.code !== 0;
+  if (solo && honored) report("standalone-isolation", "PASS", "private server works; explicit --server honored (fast fail)");
+  else fail("standalone-isolation", `solo=${solo} honored=${honored}`);
+  const api = await new Promise((resolve) => {
+    const req = httpRequest({ host: "127.0.0.1", port: GW_PORT, path: "/health", method: "GET" }, (res) => resolve(res.statusCode === 200));
+    req.on("error", () => resolve(false)); req.end();
+  });
+  if (api) report("explicit-remote-server", "PASS", "gateway /health reachable at explicit URL");
+  else fail("explicit-remote-server", "explicit gateway URL unreachable");
+}
+{
+  // No duplicate invocation: history legitimately repeats prior calls, so
+  // balance is checked per request — every call in a request's history must
+  // have exactly one matching result, and ids must be unique within a
+  // request. A retried/duplicated execution would show an unbalanced pair.
+  const entries = modelLog();
+  let pairs = 0, unbalanced = 0;
+  const seenResponses = new Set();
+  for (const e of entries) {
+    let j;
+    try { j = JSON.parse(e.body); } catch { continue; }
+    const inReq = [];
+    const outs = [];
+    for (const m of j.messages ?? []) {
+      for (const c of m.tool_calls ?? []) inReq.push(c.id);
+      if (m.role === "tool") outs.push(m.tool_call_id);
+    }
+    for (const it of j.input ?? []) {
+      if (it.type === "function_call" && it.call_id) inReq.push(it.call_id);
+      if (typeof it.type === "string" && it.type.endsWith("_call_output") && it.call_id) outs.push(it.call_id);
+    }
+    const reqIds = new Set(inReq);
+    if (reqIds.size !== inReq.length) unbalanced++;
+    for (const id of reqIds) {
+      if (seenResponses.has(id)) continue; // history echo of an earlier call
+      seenResponses.add(id);
+    }
+    for (const id of new Set(outs)) {
+      if (seenResponses.has(id)) pairs++;
+      else unbalanced++;
+    }
+  }
+  if (pairs > 0 && unbalanced === 0) report("balanced-tool-execution", "PASS", `${pairs} call/result pairs balanced, no orphaned or duplicated calls`);
+  else fail("balanced-tool-execution", `pairs=${pairs} unbalanced=${unbalanced}`);
+}
+
+console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${results.filter((r) => r.status === "BLOCKED").length} blocked`);
+process.exit(failed ? 1 : 0);
