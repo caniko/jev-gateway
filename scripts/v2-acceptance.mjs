@@ -146,7 +146,7 @@ if (!existsSync(join(GATEWAY_ROOT, "dist/index.js"))) { fail("preflight", `gatew
 
 const { bin, blocked, error } = resolveBinary();
 if (error) { fail("preflight", error); process.exit(1); }
-const ALL_CHECKS = ["binary-version","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","plugin-influence","plugin-fail-open","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
+const ALL_CHECKS = ["binary-version","text-roundtrip","native-tool-loop","mcp-connection","mcp-invocation","selection-via-opencode","plugin-influence","plugin-fail-open","plugin-only-influence","multi-turn-continuity","deny-write-side-effect-free","ask-write-safe-default","image-bypass-via-gateway","credentials-routing","jev-auth-credential","standalone-isolation","shared-service-existing","explicit-remote-server","balanced-tool-execution","cancellation-no-retry-storm"];
 if (blocked) {
   // Single exit policy: record BLOCKED for every check and fall through to
   // the strict gate below, which fails on anything but the documented
@@ -345,6 +345,29 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
     if (r2.code === 0 && hints2 === 0 && r2.out.includes("acceptance-final-answer"))
       report("plugin-fail-open", "PASS", "dead gateway left the run untouched, no hint");
     else fail("plugin-fail-open", `exit=${r2.code} hints=${hints2}`);
+  }
+  {
+    // Plugin-only isolation: the provider talks straight to the stub (the
+    // proxy is nowhere in the path), so any routing hint can only come
+    // from the plugin's own context hook.
+    const pluginDir = packagedPluginDir;
+    await rejev("read");
+    writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, {
+      rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: GW.replace(/\/v1$/, ""), timeoutMs: 8000 } }] },
+    });
+    const before = modelLog().length;
+    const jevBefore = jevCalls();
+    const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
+    const hints = modelLog().slice(before).filter((e) => (e.body ?? "").includes("[jev-routing]")).length;
+    // Provider baseURL above points at the stub, so the proxy is
+    // structurally absent: hints plus a Jev consultation prove the plugin
+    // path alone.
+    const jevDelta = jevCalls() - jevBefore;
+    await rejev("no_tool_needed");
+    writeProject(GW);
+    if (r.code === 0 && hints >= 1 && jevDelta > 0 && r.out.includes("acceptance-final-answer"))
+      report("plugin-only-influence", "PASS", `hint from plugin alone ${hints}x, Jev consulted ${jevDelta}x`);
+    else fail("plugin-only-influence", `exit=${r.code} hints=${hints} jevDelta=${jevDelta}`);
   }
 }
 {
@@ -575,6 +598,8 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   else fail("cancellation-no-retry-storm", `signal=${killed.signal} code=${killed.code} before=${before} after=${after} settled=${settled}`);
 }
 
+} // end if (!blocked): binary-driven scenarios require a usable binary
+
 function printSummary() {
   const blockedNames = results.filter((r) => r.status === "BLOCKED").map((r) => r.name);
   // Only documented version-limited checks may stay BLOCKED without failing
@@ -589,6 +614,5 @@ function printSummary() {
   }
   console.log(`\n${results.filter((r) => r.status === "PASS").length} passed, ${failed} failed, ${blockedNames.length} blocked`);
 }
-} // end if (!blocked): binary-driven scenarios require a usable binary
 printSummary();
 process.exit(failed ? 1 : 0);
