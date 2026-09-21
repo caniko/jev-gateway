@@ -14,6 +14,7 @@ import {
   TOOL_KEY,
   type ToolPlan,
 } from "./questions.js";
+import { policyFor } from "./policies.js";
 import { buildState } from "./state.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
 
@@ -190,8 +191,16 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // Neither can namespaced ones: backends reject both `tool_choice.namespace` and the bare name.
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
+  // Per-tool policy: passthrough leaves selection+args to the main model
+  // (tools stay in the upstream request); selection-only may select but never
+  // synthesize; direct-eligible allows direct only when all gates pass.
+  // Global directCalls=false always wins. Policies are config-only: MCP
+  // descriptions/results cannot change them, and approvals stay authoritative.
+  const policy = policyFor(plan.name, config.toolPolicies);
+  if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
+
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (resolved) {
+  if (resolved && config.directCalls && policy === "direct-eligible") {
     return {
       mode: "direct",
       tool: plan.name,
