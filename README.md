@@ -306,6 +306,15 @@ is the usual outcome: Jev picks the tool and the LLM fills in the free-form argu
 needs a fully closed schema (only enums, booleans, or constants), which fits small MCP-style tools
 with fixed choices rather than everyday file and shell tools.
 
+Direct arguments must satisfy the tool's schema. Supported schemas describe an object with
+`properties`, `required`, and boolean `additionalProperties`; the object type may be omitted.
+Properties may use constants, scalar enums, or booleans, with matching declared types or type
+unions. Known annotations (`title`, `description`, `default`, `examples`, `$comment`, `deprecated`,
+`readOnly`, and `writeOnly`) do not add constraints; defaults are never applied. Optional
+arguments can remain absent. OpenAI function tools may omit `parameters` to declare no arguments.
+Malformed schemas, contradictory closed values, ambiguous enum labels, references, composition,
+and other validation keywords delegate argument construction to the LLM without changing the schema.
+
 The launcher sets `OPENCODE_EXPERIMENTAL_NATIVE_LLM=false` and
 `OPENCODE_EXPERIMENTAL_CODE_MODE=false` for the launched process only. Those experimental modes
 are outside the supported path; the stable AI SDK provider above is the supported one.

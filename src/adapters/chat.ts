@@ -17,7 +17,8 @@ function toTools(rawTools: ToolDef[]): RouterTool[] {
   for (const tool of rawTools) {
     if (tool.type === "function") {
       const { name, description, parameters } = tool.function!;
-      tools.push({ kind: "function", name, description, parameters });
+      tools.push({ kind: "function", name, description,
+        parameters: Object.hasOwn(tool.function!, "parameters") ? parameters : { type: "object", properties: {} } });
     } else if (tool.custom?.name) {
       tools.push({ kind: "hosted", name: tool.custom.name, description: tool.custom.description });
     } else if (!builtIns.has(tool.type)) {
