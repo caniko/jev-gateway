@@ -173,17 +173,21 @@ const chatToolSSE = (name, args) =>
 createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => setTimeout(handle, delayNow()));
-  function handle() {
-    n++;
+  req.on("end", () => {
     const auth = req.headers.authorization ?? "";
     const spec = wantsTool(body);
     const entry = {
-      n, method: req.method, url: req.url, hasClientSentinel: auth.includes("client-sentinel"),
-      hasJevSentinel: auth.includes("jev-sentinel"), servedTool: spec?.name ?? null, body,
+      method: req.method, url: req.url, hasClientSentinel: auth.includes("client-sentinel"),
+      hasJevSentinel: auth.includes("jev-sentinel"), plannedTool: spec?.name ?? null, body,
     };
+    // Arrival, not delayed response time, defines when a cancellation test is in flight.
     appendFileSync(LOG, JSON.stringify(entry) + "\n");
     const scripted = toolSpec();
+    const timer = setTimeout(() => handle(spec, scripted), delayNow());
+    res.once("close", () => clearTimeout(timer));
+  });
+  function handle(spec, scripted) {
+    n++;
     const adversarial = scripted?.name === "@adversarial-write" || (scripted?.name === "@mcp" && JSON.parse(scripted.args).denied === true);
     const contractError = modelContractError(JSON.parse(body || "{}"), spec, adversarial);
     if (contractError) {

@@ -100,7 +100,7 @@
       "id": 23,
       "url": "https://github.com/vinilana/jev-gateway/pull/23",
       "branch": "test/opencode-v2-mcp-acceptance",
-      "headSha": "1866550617362b5ae0267810b13cbe21a3d168d4",
+      "headSha": "1ec7a5156f32cb5edbc938e4184d385fd9c9da26",
       "ownDeltaBase": "27f3c67909ebcff0d7685aaa84d0b1eb189f97c4",
       "dependencies": [
         "feat/opencode-v2"
