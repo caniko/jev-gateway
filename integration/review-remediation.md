@@ -46,15 +46,22 @@ hits its subprocess deadline) and pass after canonical JSON keys replace pairwis
 
 ## Qualification evidence
 
-Runtime tarball SHA-256: `f7ae8f67c9a8ee0e633c9477d25d7787521a3e5fc446ee17e1b029a73b32512c`.
-The local installed-artifact run at `c980a17b1a3454339835b7bc83b87fcc5d22c4e9` passed all **36** checks.
-The earlier revised artifact also passed all 36 with released OpenCode 2.0.12. These are distinct
+Local runtime tarball SHA-256: `75eb5b81589e1fbbd207edcc137bfc8c935e0c9361bad10e2602566cc314bcc7`.
+The local installed-artifact run at `afced90ac7240b1a6326f699e30466db36563c0b` passed all **36** checks.
+The CI-built artifact (`5036dd7a28489c5581db4e03a2e197d9d547707fe14f6dcad982df6934eaa45d`)
+also passed all 36 with released OpenCode 2.0.12 and the source-built readiness candidate. These are distinct
 from cold-start and production gates, detailed in [`production-status.md`](production-status.md).
 
 Production-only installation contains the gateway and its two runtime dependencies; loading the
 published JavaScript plugin requires no OpenCode SDK package. The qualification SDK has its own
 explicit private development dependency and frozen lockfile. Registry bootstrap and loopback
 scenario traffic are documented separately.
+
+All 19 jobs passed in [fork CI run 35720436028](https://github.com/caniko/jev-gateway/actions/runs/35720436028)
+for `afced90ac7240b1a6326f699e30466db36563c0b`, including every exact feature head on both Node
+versions, clean reconstruction, released-binary acceptance, and source-built cold readiness.
+The clean reconstruction check also passed twice locally. Seven PR titles/bodies were updated
+and all 31 inline review comments received specific replies.
 
 Current fork CI: [integration workflow](https://github.com/caniko/jev-gateway/actions/workflows/integration.yml?query=branch%3Amaster).
 Upstream CI still requires contributor approval; fork results do not replace it. No review thread
