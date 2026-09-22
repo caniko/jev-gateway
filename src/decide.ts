@@ -15,6 +15,7 @@ import {
   type ToolPlan,
 } from "./questions.js";
 import { buildState } from "./state.js";
+import { normalizeToolName, policyFor } from "./policies.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
 
 /** The one Jev call the router makes; injectable so tests need no network. */
@@ -175,6 +176,11 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   }
 
   if (!wantsTool) {
+    const roster = input.tools.map((tool) => tool.name);
+    if (new Set(roster.map(normalizeToolName)).size !== roster.length
+      || roster.some((name) => policyFor(name, config.toolPolicies) === "passthrough")) {
+      return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
+    }
     // A hint can suggest a tool; suggesting silence would only risk ending an agent's turn early.
     return config.onNone === "force_none" && input.steer !== "hint"
       ? { mode: "none", confidence: picked.confidence, jev }
@@ -190,8 +196,12 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // Neither can namespaced ones: backends reject both `tool_choice.namespace` and the bare name.
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
+  // Resolve against the full roster, including candidates removed by shortlisting.
+  const policy = policyFor(plan.name, config.toolPolicies, input.tools.map((tool) => tool.name));
+  if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
+
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (config.directCalls && resolved) {
+  if (config.directCalls && policy === "direct-eligible" && resolved) {
     return {
       mode: "direct",
       tool: plan.name,
