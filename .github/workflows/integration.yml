@@ -19,7 +19,7 @@ jobs:
     outputs:
       features: ${{ steps.manifest.outputs.features }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: manifest
@@ -44,12 +44,12 @@ jobs:
         node: ["22.15", "24"]
         feature: ${{ fromJSON(needs.feature-matrix.outputs.features) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ matrix.feature.headSha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -66,11 +66,11 @@ jobs:
       matrix:
         node: ["22.15", "24"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -97,11 +97,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: pnpm
@@ -111,3 +111,60 @@ jobs:
       - run: node integration/qualification/v2-acceptance.mjs --install-binary
         # --install-binary fetches only the pinned registry artifact and
         # Missing binary or any required BLOCKED check fails acceptance.
+
+  cold-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gateway
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: caniko/opencode
+          ref: 1b894b926a9e69a6211e3f0185d8f51d743a7f89
+          path: runtime-source
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: gateway/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: gateway/pnpm-lock.yaml
+      - run: bun install --frozen-lockfile
+        working-directory: runtime-source
+      - run: bun test test/mcp.test.ts
+        working-directory: runtime-source/packages/core
+      - run: bun run build --single --skip-install --skip-web-ui
+        working-directory: runtime-source/packages/cli
+        env:
+          OPENCODE_CHANNEL: jev-readiness
+          OPENCODE_VERSION: 2.0.12-mcp.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir integration/qualification install --frozen-lockfile
+      - run: pnpm build
+      - name: Qualify the exact source-built executable
+        run: |
+          export OPENCODE_V2_BIN="$GITHUB_WORKSPACE/runtime-source/packages/cli/dist/cli-linux-x64/bin/opencode"
+          export OPENCODE_V2_VERSION=2.0.12-mcp.1
+          export OPENCODE_V2_SHA256="$(node --input-type=module -e 'import {createHash} from "node:crypto"; import {readFileSync} from "node:fs"; console.log(createHash("sha256").update(readFileSync(process.env.OPENCODE_V2_BIN)).digest("hex"));')"
+          node integration/qualification/v2-cold-start.mjs
+          node --input-type=module -e 'import {writeFileSync} from "node:fs"; writeFileSync(process.env.RUNNER_TEMP + "/runtime-pin.json", JSON.stringify({version:process.env.OPENCODE_V2_VERSION,sha256:process.env.OPENCODE_V2_SHA256,firstTurnReady:true,platform:process.platform,arch:process.arch,variant:"source-build"}));'
+          node integration/qualification/v2-acceptance.mjs --runtime-pin="$RUNNER_TEMP/runtime-pin.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cold-readiness-evidence
+          path: |
+            ${{ runner.temp }}/runtime-pin.json
+            /tmp/jev-cold-*/**/evidence.json
+          retention-days: 7
