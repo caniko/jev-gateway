@@ -89,7 +89,7 @@ bin/                  launchers: launcher.mjs is shared, clients.mjs describes e
                       setup.mjs is the first-run setup
 scripts/mock-jev.mjs  local stand-in for Jev
 test/                 vitest suites; helpers.ts has the fakes
-docs/                 releasing.md, homebrew-tap.md
+docs/                 releasing.md, homebrew-tap.md, client-fixtures.md
 ```
 
 A request flows through them in this order: `app.ts` picks the adapter for the path, the adapter
@@ -136,6 +136,10 @@ without it. A feature comes with tests for the modes it touches, streaming inclu
 format streams.
 
 ## Adding a wire format
+
+For disposable real-client testing beyond the unit suite, see
+[Client fixtures](docs/client-fixtures.md). Installation may need the package registry; fixture
+traffic is loopback. These checks do not require access to a personal client configuration.
 
 1. Implement `Adapter` (`src/adapters/adapter.ts`) in a new file under `src/adapters/`:
    `toInput` to describe the request to Jev or say why it cannot be routed, `apply` to rewrite it
