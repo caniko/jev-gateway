@@ -1,4 +1,4 @@
-# MCP acceptance
+# Historical MCP acceptance (superseded; not current evidence)
 
 Two separated levels. Preceding PRs own their regression tests; this is
 reusable cross-component tooling. Every PASS corresponds to an executed

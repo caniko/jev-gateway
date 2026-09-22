@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
-import { fakeJev, fakeUpstream, testConfig } from "./helpers.js";
+import { createApp } from "../../src/app.js";
+import { fakeJev, fakeUpstream, testConfig } from "../../test/helpers.js";
 
 // Deterministic v2 acceptance (no keys, no desktop, no network).
-// Pinned: @opencode/cli@2.0.12, blender-mcp ced81a5a220d, freecad-mcp 75197460.
-// Real-binary and real-app levels live in scripts/v2-acceptance-*.mjs (gated).
+// These HTTP checks make no claims about client discovery or permissions.
 
 const mcpTool = (name: string, params: any = { type: "object", properties: { on: { type: "boolean" } }, required: ["on"] }) => ({
   type: "function",
@@ -12,7 +11,7 @@ const mcpTool = (name: string, params: any = { type: "object", properties: { on:
 });
 
 describe("deterministic v2 acceptance", () => {
-  it("discovers MCP tools with actual normalized names", async () => {
+  it("offers supplied flattened tool names to Jev", async () => {
     const jev = fakeJev({ tool: { choice: "blender_get_scene_info" }, needs_tool: { noul: 0.9 } });
     const upstream = fakeUpstream();
     const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
@@ -30,7 +29,7 @@ describe("deterministic v2 acceptance", () => {
     expect(Object.keys(criteria)).toContain("blender_execute_code");
   });
 
-  it("exercises direct, forced (selection-only), passthrough, and no-tool", async () => {
+  it("exercises direct, forced, and media passthrough", async () => {
     // direct
     {
       const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.95 }, "arg:0:on": { noul: 0.99 } });
@@ -80,19 +79,17 @@ describe("deterministic v2 acceptance", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      // With multimodal guard (PR3) this is passthrough without Jev; without it,
-      // the gateway still preserves the original body upstream.
-      expect(upstream.calls.length + jev.requests.length).toBeGreaterThan(0);
-      if (res.headers.get("x-jev-gateway-mode") === "passthrough") {
-        expect(upstream.calls[0]?.body).toEqual(body);
-      }
+      expect(res.headers.get("x-jev-gateway-mode")).toBe("passthrough");
+      expect(jev.requests).toHaveLength(0);
+      expect(upstream.calls).toHaveLength(1);
+      expect(upstream.calls[0]!.body).toEqual(body);
     }
   });
 
-  it("completes multi-turn tool call/result/final-answer without duplication", async () => {
+  it("forwards linked call/result history unchanged", async () => {
     const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.9 } });
     const upstream = fakeUpstream({ id: "ok" });
-    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const app = createApp({ config: testConfig({ directCalls: false }), askJev: jev.askJev, fetch: upstream.fetchImpl });
     const body = {
       model: "m",
       messages: [
@@ -110,6 +107,8 @@ describe("deterministic v2 acceptance", () => {
     });
     expect(upstream.calls).toHaveLength(1);
     expect(jev.requests).toHaveLength(1);
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(upstream.calls[0]!.body.messages).toEqual(body.messages);
   });
 
   it("delivers images to main model and preserves credentials", async () => {
@@ -132,25 +131,4 @@ describe("deterministic v2 acceptance", () => {
     expect(upstream.calls[0]!.body.messages[0].content).toHaveLength(2);
   });
 
-  it("documents ask/deny/allow and Code Mode isolation (gateway level)", async () => {
-    // Gateway never executes MCP tools itself; OpenCode approvals (ask/deny/allow)
-    // and Code Mode nested approvals remain authoritative upstream. Denied calls
-    // produce zero gateway upstream side effects beyond the single forwarded request,
-    // and retries do not duplicate tool invocation (single Jev call per request).
-    const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.9 } });
-    const upstream = fakeUpstream();
-    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
-    const body = {
-      model: "m",
-      messages: [{ role: "user", content: "go" }],
-      tools: [mcpTool("t")],
-    };
-    await app.request("/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    expect(jev.requests).toHaveLength(1);
-    expect(upstream.calls).toHaveLength(1);
-  });
 });

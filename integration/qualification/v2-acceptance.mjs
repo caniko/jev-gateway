@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Executable OpenCode v2 + jev-gateway acceptance.
 //
-// Topology (all loopback, no keys, no desktop):
+// Scenario traffic is loopback; package/bootstrap installation may contact registries.
 //   opencode run --standalone -> [gateway dist/ | stub model] -> stub model
 //   gateway -> mock-jev (scripts/mock-jev.mjs) for Jev answers
 //   opencode --(MCP stdio)--> acceptance fixture (counter file for side effects)
@@ -12,27 +12,32 @@
 // every binary-driven check reports BLOCKED, never PASS.
 //
 // Every PASS below corresponds to an executed assertion in this process.
-// Usage: node scripts/v2-acceptance.mjs [--install-binary] [--binary PATH] [--keep]
+// Usage: node integration/qualification/v2-acceptance.mjs [--install-binary] [--binary=PATH] [--keep]
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
-import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hermeticEnv } from "./environment.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const pinPath = process.argv.find((a) => a.startsWith("--runtime-pin="))?.slice("--runtime-pin=".length);
 const pin = pinPath ? JSON.parse(readFileSync(pinPath, "utf8")) : {
   version: "2.0.12", sha256: "2b0825721cb12f9bca3d5099588087d557a21ed2b5b56efebea3f17dc5f79e6a", firstTurnReady: false,
+  platform: "linux", arch: "x64", variant: "glibc-avx2",
 };
-if (!/^[a-zA-Z0-9.-]+$/.test(pin.version ?? "") || !/^[a-f0-9]{64}$/.test(pin.sha256 ?? "") || typeof pin.firstTurnReady !== "boolean") throw new Error("invalid explicit runtime pin");
+if (!/^[a-zA-Z0-9.+-]+$/.test(pin.version ?? "") || !/^[a-f0-9]{64}$/.test(pin.sha256 ?? "") || typeof pin.firstTurnReady !== "boolean"
+  || pin.platform !== process.platform || pin.arch !== process.arch || typeof pin.variant !== "string") throw new Error("invalid or incompatible runtime platform pin");
 const VERSION = pin.version;
 const CLI_SHA256 = pin.sha256;
 const args = new Set(process.argv.slice(2));
 const KEEP = args.has("--keep");
 
 const work = mkdirTmp();
+const harnessIso = { home: join(work, "harness-home"), config: join(work, "harness-config"),
+  data: join(work, "harness-data"), cache: join(work, "harness-cache"), state: join(work, "harness-state") };
+for (const directory of Object.values(harnessIso)) mkdirSync(directory, { recursive: true, mode: 0o700 });
 function mkdirTmp() {
   const dir = join(tmpdir(), `jev-acceptance-${process.pid}`);
   mkdirSync(dir, { recursive: true });
@@ -48,7 +53,7 @@ const report = (name, status, reason = "") => {
 import { sleep, waitFor } from "./readiness.mjs";
 
 function freePort(port) {
-  const out = spawnSync("node", ["-e", `require("net").createServer().once("error",()=>process.exit(1)).once("listening",function(){this.close();process.exit(0)}).listen(${port},"127.0.0.1")`]);
+  const out = spawnSync(process.execPath, ["-e", `require("net").createServer().once("error",()=>process.exit(1)).once("listening",function(){this.close();process.exit(0)}).listen(${port},"127.0.0.1")`], { env: hermeticEnv(harnessIso), timeout: 5000 });
   return out.status === 0;
 }
 
@@ -62,8 +67,8 @@ function resolveBinary() {
   if (!args.has("--install-binary")) return { blocked: "set OPENCODE_V2_BIN/--binary or pass --install-binary to fetch the pinned artifact" };
   if (pinPath) return { error: "an explicit runtime pin requires its already-built OPENCODE_V2_BIN" };
   try {
-    execFileSync("npm", ["install", "--prefix", join(work, "v2bin"), "--no-audit", "--no-fund", `@opencode/cli@${VERSION}`], { stdio: "pipe", timeout: 180000 });
-    execFileSync("node", [join(work, "v2bin/node_modules/@opencode/cli/postinstall.mjs")], { stdio: "pipe", timeout: 60000 });
+    execFileSync("npm", ["install", "--prefix", join(work, "v2bin"), "--no-audit", "--no-fund", `@opencode/cli@${VERSION}`], { env: hermeticEnv(harnessIso), stdio: "pipe", timeout: 180000 });
+    execFileSync(process.execPath, [join(work, "v2bin/node_modules/@opencode/cli/postinstall.mjs")], { env: hermeticEnv(harnessIso), stdio: "pipe", timeout: 60000 });
     const bin = join(work, "v2bin/node_modules/@opencode/cli/bin/opencode.exe");
     if (!existsSync(bin)) return { error: "installed package has no binary" };
     return { bin };
@@ -74,52 +79,38 @@ function resolveBinary() {
 
 // --- processes ------------------------------------------------------------
 const children = [];
+function killChild(child, signal = "SIGKILL") {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try { process.kill(-child.pid, signal); } catch { child.kill(signal); }
+}
 function spawnLogged(name, cmd, cmdArgs, env, logFile) {
   const log = [];
-  const child = spawn(cmd, cmdArgs, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(cmd, cmdArgs, { detached: true, env: hermeticEnv(harnessIso, env), stdio: ["ignore", "pipe", "pipe"] });
+  child.on("error", (error) => log.push(`spawn error: ${error.message}`));
   child.stdout.on("data", (d) => log.push(d.toString()));
   child.stderr.on("data", (d) => log.push(d.toString()));
   children.push({ name, child, log });
   return { child, log };
 }
-const httpPost = (port, path, body) =>
-  new Promise((resolve, reject) => {
-    const req = httpRequest({ host: "127.0.0.1", port, path, method: "POST", headers: { "content-type": "application/json" } }, (res) => {
-      let data = "";
-      res.on("data", (c) => (data += c));
-      res.on("end", () => resolve({ status: res.statusCode, data }));
-    });
-    req.on("error", reject);
-    req.end(body);
-  });
-const httpGet = (port, path) =>
-  new Promise((resolve) => {
-    const req = httpRequest({ host: "127.0.0.1", port, path, method: "GET" }, (res) => {
-      res.resume();
-      res.on("end", () => resolve(res.statusCode));
-    });
-    req.on("error", () => resolve(0));
-    req.end();
-  });
-
-const BASE_ENV_KEYS = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TZ", "NO_COLOR", "TERM"];
-function hermeticEnv(iso, extraEnv = {}) {
-  const env = {};
-  for (const k of BASE_ENV_KEYS) if (process.env[k] !== undefined) env[k] = process.env[k];
-  return {
-    ...env, HOME: iso.home, XDG_CONFIG_HOME: iso.config, XDG_DATA_HOME: iso.data,
-    XDG_CACHE_HOME: iso.cache, XDG_STATE_HOME: iso.state, OPENAI_API_KEY: "stub-key", ...extraEnv,
-  };
+async function boundedFetch(input, init = {}) {
+  return fetch(input, { ...init, signal: AbortSignal.any([AbortSignal.timeout(30000), ...(init.signal ? [init.signal] : [])]) });
+}
+async function httpGet(port, path, signal) {
+  const response = await boundedFetch(`http://127.0.0.1:${port}${path}`, { signal });
+  await response.arrayBuffer();
+  return response.status;
 }
 
 function runOpencode(bin, iso, project, runArgs, extraEnv = {}, timeoutMs = 120000) {
   return new Promise((resolve) => {
-    const child = spawn(bin, runArgs, { cwd: project, env: hermeticEnv(iso, extraEnv), stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(bin, runArgs, { detached: true, cwd: project, env: hermeticEnv(iso, extraEnv), stdio: ["ignore", "pipe", "pipe"] });
+    children.push({ name: "opencode-run", child, log: [] });
     let out = "", err = "";
     child.stdout.on("data", (d) => (out += d.toString()));
     child.stderr.on("data", (d) => (err += d.toString()));
-    const timer = setTimeout(() => { child.kill("SIGKILL"); }, timeoutMs);
-    child.on("exit", (code, signal) => { clearTimeout(timer); resolve({ code, signal, out, err }); });
+    const timer = setTimeout(() => killChild(child), timeoutMs);
+    child.on("error", (error) => { err += error.message; clearTimeout(timer); resolve({ code: null, signal: null, out, err }); });
+    child.on("close", (code, signal) => { clearTimeout(timer); resolve({ code, signal, out, err }); });
   });
 }
 
@@ -139,7 +130,7 @@ const modelLog = () => readFileSync(join(work, "model-requests.log"), "utf8").sp
 // --- main -----------------------------------------------------------------
 let failed = 0;
 const fail = (name, reason) => { failed++; report(name, "FAIL", reason); };
-const cleanup = () => { for (const c of children) try { c.child.kill("SIGKILL"); } catch {} if (!KEEP) rmSync(work, { recursive: true, force: true }); };
+const cleanup = () => { for (const c of children) killChild(c.child); if (!KEEP) rmSync(work, { recursive: true, force: true }); };
 process.on("exit", cleanup);
 process.on("SIGINT", () => { cleanup(); process.exit(2); });
 
@@ -168,13 +159,11 @@ const ALL_CHECKS = [
   "balanced-tool-execution", "cancellation-no-retry-storm",
 ];
 if (blocked) {
-  // Single exit policy: record BLOCKED for every check and fall through to
-  // the strict gate below, which fails on anything but the documented
-  // version-limited exception. No early successful exit exists.
+  // Every required BLOCKED result fails the gate.
   for (const name of ALL_CHECKS) report(name, "BLOCKED", blocked);
 }
 if (!blocked) {
-const ver = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 30000 });
+const ver = spawnSync(bin, ["--version"], { env: hermeticEnv(harnessIso), encoding: "utf8", timeout: 30000 });
 const binaryHash = createHash("sha256").update(readFileSync(bin)).digest("hex");
 if (ver.status !== 0 || ver.stdout?.trim() !== `opencode v${VERSION}` || binaryHash !== CLI_SHA256) {
   fail("binary-version", `expected pinned Linux x64 ${VERSION} artifact; version=${JSON.stringify(ver.stdout?.trim())}, sha256=${binaryHash}`);
@@ -216,7 +205,7 @@ const writeProject = (providerBase, extra = {}) => {
   writeFileSync(join(project, "counter.log"), "");
   try { rmSync(join(project, "toolmode")); } catch {}
 };
-const FIX = (name) => join(ROOT, "test/fixtures", name);
+const FIX = (name) => name === "acceptance-jev-auth.mjs" ? join(ROOT, "integration/qualification", name) : join(ROOT, "test/fixtures", name);
 
 // model stub + mock jev stay up for the whole run
 writeFileSync(join(project, "counter.log"), "");
@@ -241,7 +230,8 @@ try {
 const jevCalls = () => jev.log.join("").split("\n").filter((l) => l.includes('"n":')).length;
 // Restart mock-jev with a new script (selection scenarios need picked tools).
 async function rejev(script, confidence = "0.95") {
-  try { jev.child.kill("SIGKILL"); } catch {}
+  killChild(jev.child);
+  await waitFor(() => jev.child.exitCode !== null || jev.child.signalCode !== null, 5000, "previous Jev process exit");
   jev = spawnLogged("jev", "node", [join(ROOT, "scripts/mock-jev.mjs")],
     { MOCK_JEV_PORT: String(JEV_PORT), MOCK_JEV_SCRIPT: script, MOCK_JEV_CONFIDENCE: confidence, MOCK_JEV_ARG_CERTAINTY: "0.5" });
   try {
@@ -263,18 +253,18 @@ let installedDigest = "";
 try {
   const packDest = join(work, "pack");
   mkdirSync(packDest, { recursive: true });
-  execFileSync("pnpm", ["pack", "--pack-destination", packDest], { cwd: GATEWAY_ROOT, stdio: "pipe", timeout: 120000 });
+  execFileSync("npm", ["pack", "--pack-destination", packDest, "--ignore-scripts"], { env: hermeticEnv(harnessIso), cwd: GATEWAY_ROOT, stdio: "pipe", timeout: 120000 });
   const tgz = readdirSync(packDest).find((f) => f.endsWith(".tgz"));
   if (!tgz) throw new Error("no tarball produced");
-  const digest = execFileSync("sha256sum", [join(packDest, tgz)], { encoding: "utf8" }).split(/\s/)[0];
+  const digest = createHash("sha256").update(readFileSync(join(packDest, tgz))).digest("hex");
   installedDigest = `sha256:${digest}`;
-  execFileSync("npm", ["install", "--prefix", join(work, "pkginstall"), "--no-audit", "--no-fund", join(packDest, tgz)],
-    { stdio: "pipe", timeout: 180000 });
-  packagedPluginDir = join(work, "pkginstall/node_modules/jev-gateway/plugin/jev");
+  execFileSync("npm", ["install", "--prefix", join(work, "pkginstall"), "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", join(packDest, tgz)],
+    { env: hermeticEnv(harnessIso), stdio: "pipe", timeout: 180000 });
+  packagedPluginDir = join(work, "pkginstall/node_modules/jev-gateway/dist/plugin/jev");
   installedGateway = join(work, "pkginstall/node_modules/jev-gateway/dist/index.js");
-  if (!existsSync(join(packagedPluginDir, "index.ts"))) throw new Error("tarball lacks plugin/jev/index.ts");
+  if (!existsSync(join(packagedPluginDir, "index.js"))) throw new Error("tarball lacks compiled plugin");
   if (!existsSync(installedGateway)) throw new Error("tarball lacks dist/index.js");
-  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: GATEWAY_ROOT, encoding: "utf8" }).trim();
+  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { env: hermeticEnv(harnessIso), cwd: GATEWAY_ROOT, encoding: "utf8", timeout: 10000 }).trim();
   report("installed-artifact", "PASS", `source=${sourceSha}, tarball=${installedDigest}, gateway+plugin installed without devDeps`);
 } catch (e) {
   fail("preflight", `installed artifact setup failed: ${String(e.message ?? e).slice(0, 200)}`);
@@ -286,8 +276,8 @@ const gateway = spawnLogged("gateway", "node", [installedGateway], {
   TYPESAFE_BASE_URL: `http://127.0.0.1:${JEV_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
 });
 try {
-  await waitFor(async () => {
-    try { const r = await httpGet(GW_PORT, "/health"); return r === 200; } catch { return false; }
+  await waitFor(async (signal) => {
+    try { const r = await httpGet(GW_PORT, "/health", signal); return r === 200; } catch { return false; }
   }, 60000, "gateway health");
 } catch (e) {
   fail("preflight", `${e.message} gateway-log=${JSON.stringify(gateway.log.join("").slice(-800))}`);
@@ -330,6 +320,7 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
     report("mcp-connection", "PASS", "server connected fixture with 3 tools (log evidence only)");
   else fail("mcp-connection", "no fixture-tools=3 line in server log");
 }
+const allowedMcp = new Set();
 for (const codemode of [false, true]) for (const denied of [false, true]) {
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { fixture_test_write: denied ? "deny" : "allow" } });
   const configPath = join(project, "opencode.json");
@@ -349,8 +340,12 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   const bodies = modelLog().slice(before).map((e) => JSON.parse(e.body || "{}"));
   const roster = bodies.flatMap((b) => (b.tools ?? []).map((t) => t.function?.name ?? t.name));
   const results = bodies.flatMap((b) => b.messages ?? []).filter((m) => m.role === "tool");
+  const searchIds = new Set(bodies.flatMap((body) => body.messages ?? []).flatMap((message) => message.tool_calls ?? [])
+    .filter((call) => call.function?.name === "execute" && call.function.arguments.includes("search("))
+    .map((call) => call.id));
+  const searchResults = results.filter((message) => searchIds.has(message.tool_call_id));
   const discovered = codemode
-    ? results.some((m) => JSON.stringify(m.content).includes("tools.fixture.test_write"))
+    ? searchResults.some((m) => JSON.stringify(m.content).includes("tools.fixture.test_write"))
     : roster.includes("fixture_test_write");
   const check = `${codemode ? "mcp-codemode" : "mcp"}-${denied ? "denial" : "invocation"}`;
   const attempts = bodies.flatMap((b) => b.messages ?? []).flatMap((m) => m.tool_calls ?? []);
@@ -358,7 +353,12 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
     ? c.function?.name === "execute" && c.function.arguments.includes("test_write")
     : c.function?.name === "fixture_test_write");
   const refusal = results.some((m) => /not available|Unknown tool|No tool named|denied|not allowed|not currently available/i.test(JSON.stringify(m.content)));
-  const verified = denied ? counter === "" && attempted && refusal : counter === `write:${marker}\n` && discovered;
+  // The same connected fixture must first execute successfully under allow. Under deny its
+  // exact action disappears from the model-visible catalog and the attempted call has no effect.
+  const hidden = codemode ? searchResults.length > 0 && !discovered : !roster.includes("fixture_test_write");
+  const verified = denied ? allowedMcp.has(codemode) && hidden && counter === "" && attempted && refusal
+    : counter === `write:${marker}\n` && discovered;
+  if (!denied && verified && result.code === 0) allowedMcp.add(codemode);
   if (result.code === 0 && verified && result.out.includes("acceptance-final-answer")) {
     report(check, "PASS", denied ? "adversarial call refused; zero MCP side effects" : "actual discovery, one tools/call side effect, final answer");
   } else {
@@ -369,12 +369,13 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   // Exercise actual pending permissions on the supported v2 server API.
   // Unlike CLI --auto / no-TTY refusal, the model pauses before an MCP
   // mutation and the test explicitly approves or rejects that request.
-  const { OpenCode } = await import(join(work, "pkginstall/node_modules/@opencode/client/dist/promise/client.js"));
+  const { OpenCode } = await import("@opencode/client");
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   const server = spawn(bin, ["serve", "--hostname", "127.0.0.1", "--port", String(SERVER_PORT)], {
-    cwd: project, env: hermeticEnv(iso), stdio: ["ignore", "pipe", "pipe"],
+    detached: true, cwd: project, env: hermeticEnv(iso), stdio: ["ignore", "pipe", "pipe"],
   });
   const serverLog = [];
+  server.on("error", (error) => serverLog.push(`spawn error: ${error.message}`));
   server.stdout.on("data", (d) => serverLog.push(d.toString()));
   server.stderr.on("data", (d) => serverLog.push(d.toString()));
   children.push({ name: "permission-server", child: server, log: serverLog });
@@ -382,11 +383,12 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
     await waitFor(() => /server password (\S+)/.test(serverLog.join("")), 20000, "ephemeral server authentication");
     const password = serverLog.join("").match(/server password (\S+)/)[1];
     const client = OpenCode.make({
+      fetch: boundedFetch,
       baseUrl: `http://127.0.0.1:${SERVER_PORT}`,
       headers: { authorization: "Basic " + Buffer.from(`opencode:${password}`).toString("base64") },
     });
-    await waitFor(async () => {
-      try { await client.server.info(); return true; } catch { return false; }
+    await waitFor(async (signal) => {
+      try { await client.server.info({ signal }); return true; } catch { return false; }
     }, 20000, "permission server");
     for (const codemode of [false, true]) for (const decision of ["once", "reject"]) {
       writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
@@ -395,8 +397,8 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
       cfg.mcp.servers.fixture.codemode = codemode;
       writeFileSync(path, JSON.stringify(cfg));
       await client.location.reload();
-      await waitFor(async () => {
-        const servers = await client.mcp.list({ location: { directory: project } });
+      await waitFor(async (signal) => {
+        const servers = await client.mcp.list({ location: { directory: project } }, { signal });
         return servers.data.some((s) => s.name === "fixture" && s.status.status === "connected");
       }, 30000, "MCP server startup before first prompt");
       const marker = `${codemode ? "nested" : "direct"}-${decision}`;
@@ -414,8 +416,8 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
       });
       await client.session.prompt({ sessionID: session.id, text: "Invoke the disposable MCP fixture once." });
       let pending;
-      await waitFor(async () => {
-        pending = (await client.permission.list({ sessionID: session.id })).find((p) => p.action === "fixture_test_write");
+      await waitFor(async (signal) => {
+        pending = (await client.permission.list({ sessionID: session.id }, { signal })).find((p) => p.action === "fixture_test_write");
         return Boolean(pending);
       }, 30000, "pending MCP permission");
       const before = readFileSync(join(project, "counter.log"), "utf8");
@@ -453,8 +455,8 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
       });
       const prompt = { sessionID: session.id, id: `msg_fixture_${phase}`, text: "One disposable fixture mutation." };
       await client.session.prompt(prompt);
-      await waitFor(async () => phase === "before-approval"
-        ? (await client.permission.list({ sessionID: session.id })).some((p) => p.action === "fixture_test_write")
+      await waitFor(async (signal) => phase === "before-approval"
+        ? (await client.permission.list({ sessionID: session.id }, { signal })).some((p) => p.action === "fixture_test_write")
         : events().some((e) => e.event === (phase === "before-commit" ? "started" : "committed")),
       30000, `mutation checkpoint ${phase}`);
       const expected = phase === "after-commit" ? `write:${phase}\n` : "";
@@ -502,7 +504,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   } catch (error) {
     fail("mcp-interactive-permissions", error.message);
   } finally {
-    server.kill("SIGTERM");
+    killChild(server, "SIGTERM");
   }
 }
 {
@@ -604,7 +606,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
     const jevDelta = jevCalls() - jevBefore;
     await rejev("no_tool_needed");
     writeProject(GW);
-    if (r.code === 0 && hints >= 1 && jevDelta > 0 && r.out.includes("acceptance-final-answer"))
+    if (r.code === 0 && hints === 1 && jevDelta === 1 && r.out.includes("acceptance-final-answer"))
       report("plugin-only-influence", "PASS", `hint from plugin alone ${hints}x, Jev consulted ${jevDelta}x`);
     else fail("plugin-only-influence", `exit=${r.code} hints=${hints} jevDelta=${jevDelta}`);
   }
@@ -627,13 +629,21 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   else fail("multi-turn-continuity", `exit=${r.code} grew=${grew} noRefs=${noRefs}`);
 }
 {
-  // deny: native write is gated by the `edit` action; refused -> file absent, run completes
+  // First prove this exact native tool works; missing tools are not permission evidence.
+  writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { edit: "allow" } });
+  const allowedPath = join(project, "allowed-write.txt");
+  writeFileSync(join(project, "toolmode"), `write ${JSON.stringify({ path: allowedPath, content: "allowed-sentinel" })}`);
+  const allowed = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "write the allowed fixture file"]);
+  const allowVerified = allowed.code === 0 && existsSync(allowedPath) && readFileSync(allowedPath, "utf8") === "allowed-sentinel";
+  // Deny removes the same native action and must prevent its adversarial invocation.
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { edit: "deny" } });
   writeFileSync(join(project, "toolmode"), `@adversarial-write {"path":"${join(project, "must-not-exist.txt")}", "content": "x"}`);
+  const before = modelLog().length;
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "write the file"]);
   try { rmSync(join(project, "toolmode")); } catch {}
   const absent = !existsSync(join(project, "must-not-exist.txt"));
-  if (r.code === 0 && absent) report("deny-write-side-effect-free", "PASS", "denied write left no file, run completed");
+  const attempted = modelLog().slice(before).some((entry) => entry.servedTool === "write");
+  if (r.code === 0 && absent && attempted && allowVerified) report("deny-write-side-effect-free", "PASS", "allow control executed; denied adversarial write left no file");
   else fail("deny-write-side-effect-free", `exit=${r.code} absent=${absent}`);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 }
@@ -642,10 +652,12 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   // (no execution) whether it errors or completes.
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { edit: "ask" } });
   writeFileSync(join(project, "toolmode"), `write {"path":"${join(project, "must-not-exist-ask.txt")}", "content": "x"}`);
+  const before = modelLog().length;
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "write the file"]);
   try { rmSync(join(project, "toolmode")); } catch {}
   const absent = !existsSync(join(project, "must-not-exist-ask.txt"));
-  if (absent) report("ask-write-safe-default", "PASS", `no TTY approval executed nothing (exit=${r.code})`);
+  const attempted = modelLog().slice(before).some((entry) => entry.servedTool === "write");
+  if (absent && attempted && r.signal === null && typeof r.code === "number") report("ask-write-safe-default", "PASS", `no TTY approval executed nothing (exit=${r.code})`);
   else fail("ask-write-safe-default", `exit=${r.code} absent=${absent}`);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 }
@@ -687,8 +699,8 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
     TYPESAFE_BASE_URL: `http://127.0.0.1:${AUTH_PORT}`, TYPESAFE_API_KEY: "jev-sentinel", JEV_CLIENT: "acceptance",
   });
   try {
-    await waitFor(async () => {
-      try { const r = await httpGet(GW2_PORT, "/health"); return r === 200; } catch { return false; }
+    await waitFor(async (signal) => {
+      try { const r = await httpGet(GW2_PORT, "/health", signal); return r === 200; } catch { return false; }
     }, 60000, "gateway2 health");
   } catch (e) {
     fail("preflight", e.message);
@@ -697,11 +709,11 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   }
   writeProject(`http://127.0.0.1:${GW2_PORT}/v1`);
   await runOpencode(bin, iso, project, ["run", "--standalone", "credential probe"]);
-  try { gw2.child.kill("SIGKILL"); auth.child.kill("SIGKILL"); } catch {}
+  killChild(gw2.child); killChild(auth.child);
   const lines = existsSync(authLog) ? readFileSync(authLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-  const good = lines.length > 0 && lines.every((l) => l.auth === "Bearer jev-sentinel");
+   const good = lines.length > 0 && lines.every((l) => l.expectedSentinel === true);
   if (good) report("jev-auth-credential", "PASS", `${lines.length} Jev hits all Bearer jev-sentinel`);
-  else fail("jev-auth-credential", `hits=${lines.length} auths=${JSON.stringify(lines.map((l) => l.auth).slice(0, 3))}`);
+  else fail("jev-auth-credential", `hits=${lines.length}, sentinel equality failed`);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 }
 {
@@ -760,7 +772,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   const r = await runOpencode(bin, iso, deadProject, ["run", "attached probe"], {}, 90000);
   const svcAfter = model2Log().length;
   spawnSync(bin, ["service", "stop"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
-  try { model2.child.kill("SIGKILL"); } catch {}
+  killChild(model2.child);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
   if (r.code !== 0 && svcAfter === svcBefore)
     report("shared-service-existing", "PASS", `attached dead-config run failed (exit=${r.code}), 0 service-stub hits`);
@@ -812,19 +824,24 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   const killed = await new Promise((resolve) => {
     const env = hermeticEnv(iso);
     const child = spawn(bin, ["run", "--standalone", "--auto", "read the fixture file"],
-      { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
+      { detached: true, cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
+    children.push({ name: "cancel-run", child, log: [] });
+    child.stderr.resume();
     let out = "";
+    let interrupt;
     child.stdout.on("data", (d) => (out += d.toString()));
     // SIGINT only after the first stub hit proves the run is in flight;
     // node reports SIGINT deaths as code 130 with null signal.
     const poll = setInterval(() => {
       if (modelLog().length > before) {
         clearInterval(poll);
-        setTimeout(() => { try { child.kill("SIGINT"); } catch {} }, 2000);
+        interrupt = setTimeout(() => { try { child.kill("SIGINT"); } catch {} }, 2000);
       }
     }, 500);
-    const guard = setTimeout(() => { clearInterval(poll); try { child.kill("SIGKILL"); } catch {} }, 60000);
-    child.on("exit", (code, signal) => { clearInterval(poll); clearTimeout(guard); resolve({ code, signal, out }); });
+    const guard = setTimeout(() => { clearInterval(poll); killChild(child); }, 60000);
+    const finish = (code, signal) => { clearInterval(poll); clearTimeout(guard); clearTimeout(interrupt); resolve({ code, signal, out }); };
+    child.on("error", () => finish(null, "spawn-error"));
+    child.on("close", finish);
   });
   await sleep(8000);
   try { rmSync(join(project, "delayms")); rmSync(join(project, "toolmode")); } catch {}
@@ -844,10 +861,7 @@ function printSummary() {
     if (!results.some((r) => r.name === name)) fail(name, "required check did not execute");
   }
   const blockedNames = results.filter((r) => r.status === "BLOCKED").map((r) => r.name);
-  // Only documented version-limited checks may stay BLOCKED without failing
-  // the gate: 2.0.12 exposes fixture MCP tools on no observable path (see
-  // docs/acceptance.md). Any other BLOCKED (e.g. no usable binary) fails,
-  // so a vacuous green run is impossible.
+  // Required checks are never exempted from the gate.
   const unexpectedBlocked = blockedNames;
   if (unexpectedBlocked.length) {
     console.log(`\nFAIL: unexpected BLOCKED checks: ${unexpectedBlocked.join(", ")}`);

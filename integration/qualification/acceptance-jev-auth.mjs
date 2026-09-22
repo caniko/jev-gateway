@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Minimal Jev stand-in that records the Authorization header of every
+// Minimal Jev stand-in that records sentinel equality, never credentials, for every
 // SystemOne request and answers "no tool needed" with low need. Values here
 // are dummy sentinels, never real credentials.
-// Env: PORT, LOG (JSON lines: {n, auth}).
+// Env: PORT, LOG (JSON lines: {n, expectedSentinel}).
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 
@@ -32,7 +32,7 @@ createServer((req, res) => {
         answers[key] = { type: "score", score: 0.5 };
       }
     }
-    appendFileSync(LOG, JSON.stringify({ n, auth: req.headers.authorization ?? "(none)" }) + "\n");
+    appendFileSync(LOG, JSON.stringify({ n, expectedSentinel: req.headers.authorization === "Bearer jev-sentinel" }) + "\n");
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ model: "auth-probe", answers, usage: { input_tokens: 10, output_tokens: 0 } }));
   });

@@ -9,15 +9,21 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn, execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hermeticEnv } from "./environment.mjs";
 
 const binary = process.env.OPENCODE_V2_BIN;
 const expectedHash = process.env.OPENCODE_V2_SHA256;
 const expectedVersion = process.env.OPENCODE_V2_VERSION;
 assert(binary && /^[a-f0-9]{64}$/.test(expectedHash ?? "") && expectedVersion, "set the exact binary, SHA256 and version");
 assert.equal(createHash("sha256").update(readFileSync(binary)).digest("hex"), expectedHash);
-assert.equal(execFileSync(binary, ["--version"], { encoding: "utf8" }).trim(), `opencode v${expectedVersion}`);
-const fixture = join(dirname(fileURLToPath(import.meta.url)), "../test/fixtures/acceptance-mcp.mjs");
+assert.equal(process.platform, "linux", "qualification is Linux x64 only");
+assert.equal(process.arch, "x64", "qualification is Linux x64 only");
+const fixture = join(dirname(fileURLToPath(import.meta.url)), "../../test/fixtures/acceptance-mcp.mjs");
 const base = mkdtempSync("/tmp/jev-cold-");
+const versionIso = Object.fromEntries(["home", "config", "data", "cache", "state"].map((key) => [key, join(base, key)]));
+for (const directory of Object.values(versionIso)) mkdirSync(directory);
+assert.equal(execFileSync(binary, ["--version"], { env: hermeticEnv(versionIso), timeout: 30000, encoding: "utf8" }).trim(), `opencode v${expectedVersion}`);
+console.log(`BINARY ${expectedVersion} sha256=${expectedHash} linux-x64`);
 console.log(`EVIDENCE ${base}`);
 let failed = 0;
 for (let trial = 0; trial < 20; trial++) {
@@ -28,8 +34,9 @@ for (let trial = 0; trial < 20; trial++) {
   const expectedTool = !disabled && !hung;
   const delay = scenario === 1 ? 150 : scenario === 2 ? 500 : 0;
   mkdirSync(root);
-  const env = { PATH: process.env.PATH, HOME: join(root, "home"), XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), XDG_STATE_HOME: join(root, "state") };
-  for (const value of Object.values(env).slice(1)) mkdirSync(value);
+  const iso = Object.fromEntries(["home", "config", "data", "cache", "state"].map((key) => [key, join(root, key)]));
+  for (const directory of Object.values(iso)) mkdirSync(directory);
+  const env = hermeticEnv(iso);
   const seen = [];
   let primary = 0;
   const server = createServer(async (req, res) => {
@@ -65,14 +72,15 @@ for (let trial = 0; trial < 20; trial++) {
     permission: { "*": "allow" },
   }));
   const started = Date.now();
-  const child = spawn(binary, ["run", "--standalone", "--auto", "Perform the disposable fixture operation once."], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(binary, ["run", "--standalone", "--auto", "Perform the disposable fixture operation once."], { detached: true, cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   child.stdout.on("data", d => output += d);
   child.stderr.on("data", d => output += d);
-  const timer = setTimeout(() => child.kill("SIGTERM"), 20000);
-  const [code, signal] = await once(child, "exit");
-  clearTimeout(timer);
-  server.close();
+  const timer = setTimeout(() => { if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 20000);
+  let code, signal;
+  try { [code, signal] = await once(child, "close"); }
+  catch (error) { code = null; signal = "spawn-error"; output += error.message; }
+  finally { clearTimeout(timer); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
   const counter = readFileSync(join(root, "counter"), "utf8");
   const valid = code === 0 && !signal && output.includes("cold-complete")
     && seen.length > 0 && seen[0].names.includes("fixture_test_write") === expectedTool

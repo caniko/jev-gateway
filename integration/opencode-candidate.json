@@ -1,0 +1,12 @@
+{
+  "version": "2.0.12+1b894b926a",
+  "sha256": "a3f84d86349cf91c6eb46424f503895fe6e6354d3301fa41d17b1c2554ffbaab",
+  "firstTurnReady": true,
+  "platform": "linux",
+  "arch": "x64",
+  "variant": "canix-nix-candidate",
+  "source": "caniko/opencode",
+  "revision": "1b894b926a9e69a6211e3f0185d8f51d743a7f89",
+  "pr": "https://github.com/anomalyco/opencode/pull/50528",
+  "storePath": "/nix/store/d94w2mzgnqqiwl0kgmzhijarcjccyha2-opencode-v2-candidate-2.0.12+1b894b926a"
+}

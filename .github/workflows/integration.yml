@@ -107,6 +107,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: node scripts/v2-acceptance.mjs --install-binary
+      - run: pnpm --dir integration/qualification install --frozen-lockfile
+      - run: node integration/qualification/v2-acceptance.mjs --install-binary
         # --install-binary fetches only the pinned registry artifact and
         # Missing binary or any required BLOCKED check fails acceptance.
