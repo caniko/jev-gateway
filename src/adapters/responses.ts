@@ -147,6 +147,8 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
     turns,
     tools: toTools(declaredTools(req)),
     toolChoice: choice === "auto" || choice === "required" ? choice : "decided",
+    // Stored sessions need real provider IDs; Responses stores by default.
+    ...(req.store === false ? {} : { allowDirect: false }),
   };
 }
 
