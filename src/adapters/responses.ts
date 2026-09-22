@@ -84,7 +84,8 @@ function toTools(raw: ResponsesTool[]): RouterTool[] {
         kind: tool.type,
         name,
         description: group ? `[${group}] ${tool.description ?? ""}`.trim() : tool.description,
-        parameters: tool.type === "function" ? tool.parameters : undefined,
+        parameters: tool.type === "function"
+          ? (Object.hasOwn(tool, "parameters") ? tool.parameters : { type: "object", properties: {} }) : undefined,
         ...(name === tool.name ? {} : { namespace: namespace?.name }),
       });
     } else if (tool.type && !tools.has(tool.type)) {

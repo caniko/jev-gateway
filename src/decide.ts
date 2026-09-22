@@ -73,7 +73,7 @@ function resolveArgs(
   answers: Answers,
   minCertainty: number,
 ): { args: Record<string, Json>; certainty: number } | undefined {
-  const args: Record<string, Json> = {};
+  const args: Record<string, Json> = Object.create(null);
   let certainty = 1;
   for (const param of plan.closedParams ?? []) {
     if (param.kind === "const") {
