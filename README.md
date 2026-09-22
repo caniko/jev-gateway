@@ -188,6 +188,12 @@ The launcher uses the proxy transport. The optional advisory plugin targets Open
 `@opencode/plugin@2.0.12` API and is an alternative for native providers. In both paths OpenCode
 owns MCP discovery, execution, permissions, and the agent loop. The gateway routes model requests.
 
+Proxy compatibility was exercised with OpenCode `1.18.31+3b7d74d` and `2.0.12`; advisory plugin
+loading and execution were exercised with `2.0.12`. The v1 checks cover default flags and the
+AI SDK path with Code Mode both off and on. They do not qualify v1's experimental native-LLM
+transport. OpenCode `2.0.12` can race first-turn MCP catalog readiness; successful warm-up and
+continuation tests do not establish cold-start readiness.
+
 **Quick path**
 
 ```bash
