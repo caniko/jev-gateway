@@ -15,6 +15,7 @@ import {
   type ToolPlan,
 } from "./questions.js";
 import { buildState } from "./state.js";
+import { caseCollisions, policyFor } from "./policies.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
 
 /** The one Jev call the router makes; injectable so tests need no network. */
@@ -128,6 +129,9 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
 
   const startedAt = performance.now();
   const state = buildState(input, config);
+  // Roster-wide protection sees every tool, even ones shortlisting drops below: compute it once
+  // from the full roster and reuse it at both policy checks.
+  const collisions = caseCollisions(input.tools.map((tool) => tool.name));
   let tools = input.tools;
   let shortlistTokens = 0;
   let result: SystemOneResult<Questions>;
@@ -175,6 +179,13 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   }
 
   if (!wantsTool) {
+    // A colliding roster only forces passthrough when the operator configured rules; an explicit
+    // default without rules still applies below, so `default: "passthrough"` keeps suppressing
+    // `none` while unset or empty configuration preserves direct-eligible behavior.
+    if ((config.toolPolicies.rules.length > 0 && collisions.size > 0)
+      || input.tools.some((tool) => policyFor(tool.name, config.toolPolicies, collisions) === "passthrough")) {
+      return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
+    }
     // A hint can suggest a tool; suggesting silence would only risk ending an agent's turn early.
     return config.onNone === "force_none" && input.steer !== "hint"
       ? { mode: "none", confidence: picked.confidence, jev }
@@ -190,8 +201,12 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // Neither can namespaced ones: backends reject both `tool_choice.namespace` and the bare name.
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
+  // Resolve against the full roster's collisions, including candidates removed by shortlisting.
+  const policy = policyFor(plan.name, config.toolPolicies, collisions);
+  if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
+
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (config.directCalls && resolved) {
+  if (config.directCalls && policy === "direct-eligible" && resolved) {
     return {
       mode: "direct",
       tool: plan.name,

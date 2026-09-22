@@ -404,7 +404,7 @@ and the value of every closed-set argument. The answer selects a mode, which is 
 | `forced` | Jev is confident about the tool, but some arguments are open-ended | Forwarded with `tool_choice` set to that tool, so the LLM only fills in arguments. `ARGS_MODEL` can send these to a cheaper model |
 | `hint` | Jev is confident, but `tool_choice` cannot be changed (Anthropic with thinking on, or a cached conversation) | Forwarded with a one-line suggestion added after the client's last block, so cached prefixes stay valid |
 | `none` | Jev is confident that no tool is needed | Forwarded with `tool_choice: "none"` |
-| `passthrough` | Low confidence, the two checks disagree, Jev failed, there are no tools, or the caller already chose | Forwarded byte for byte. `x-jev-gateway-reason` says why |
+| `passthrough` | Low confidence, the two checks disagree, Jev failed, there are no tools, the caller already chose, or a tool's policy is passthrough | Forwarded byte for byte. `x-jev-gateway-reason` says why (`tool_policy_passthrough` for policy-driven ones) |
 
 Whether a schema can be checked on its own is decided before Jev is asked anything. A schema
 qualifies when it describes an object with `properties`, `required`, and boolean
@@ -424,6 +424,26 @@ the list in groups. The second decides among the top 3 of each group, using full
 
 ## Configuration
 
+`JEV_TOOL_POLICIES` can leave selection to the main model (`passthrough`), allow Jev to select
+but not synthesize arguments (`selection-only`), or permit direct answers subject to the normal
+checks (`direct-eligible`). Unset or empty configuration preserves direct-eligible behavior, and
+case-collision protection only applies once rules are configured. `JEV_DIRECT_CALLS=false` always
+wins. Policies never remove upstream tools or replace the client's execution permissions. If any
+roster tool is effectively passthrough, Jev cannot suppress it with `none`: with
+`default: "passthrough"`, a "no tool" answer is almost never forced.
+
+Use exact identities you have reviewed; names such as `get_` or `validate_` imply no safety:
+
+```bash
+JEV_TOOL_POLICIES='{"default":"passthrough","rules":[{"match":"fixture_status","policy":"selection-only"},{"match":"fixture_mode","policy":"direct-eligible"}]}'
+```
+
+Matching is case-folded. Exact matches beat wildcard patterns (`*` matches any sequence and `?`
+one Unicode code point); otherwise more non-wildcard characters win. Equal specificity uses the
+most restrictive policy: passthrough, then selection-only, then direct-eligible. Distinct roster
+names that collide after case-folding are passthrough once rules are configured. Unknown fields
+and invalid values stop startup.
+
 Settings are environment variables. The launchers read them from your shell,
 `~/.jev-gateway/.env`, or a checkout's own `.env`. See [.env.example](.env.example) for the full
 list. The ones worth knowing:
@@ -435,6 +455,7 @@ list. The ones worth knowing:
 | `JEV_MIN_CONFIDENCE` | `0.7` | Below this confidence, the LLM decides. Lower it to route more, raise it to be more careful |
 | `JEV_ARG_MIN_CERTAINTY` | `0.8` | Every argument must reach this for a `direct` answer |
 | `JEV_DIRECT_CALLS` | `true` | Set to `false` so the gateway never answers without the LLM |
+| `JEV_TOOL_POLICIES` | unset | Inline JSON default and per-tool rules; passthrough decisions report `tool_policy_passthrough` |
 | `JEV_ROUTING` | `on` | Set to `off` to start in baseline mode |
 | `JEV_TIMEOUT_MS` | `4000` | How long to wait for Jev before letting the LLM decide |
 | `ARGS_MODEL` | unset | A cheaper model for filling arguments in `forced` mode |

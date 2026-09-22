@@ -186,6 +186,7 @@ const REASONS = {
   no_tool_needed: ["Jev asked", "Jev said no tool is needed; left to the LLM (hint-only request, or JEV_ON_NONE=passthrough)."],
   hosted_tool_selected: ["Jev asked", "Jev picked a provider-run tool, which can't be forced by name."],
   namespaced_tool_selected: ["Jev asked", "Jev picked a namespaced tool, which backends refuse to force."],
+  tool_policy_passthrough: ["Jev asked", "Jev's answer covered a tool whose effective policy is passthrough, so the LLM decides."],
   jev_unknown_tool: ["Jev asked", "Jev named a tool that isn't in the roster."],
   upstream_rejected: ["Jev asked", "Upstream refused the rewritten request; the original was replayed."],
   jev_error: ["Jev failed", "The Jev call errored or timed out. Check TYPESAFE_API_KEY and the network."],
