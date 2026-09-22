@@ -1,111 +1,53 @@
-# Production qualification — 2026-09-22
+# Production qualification status — 2026-09-22
 
-Status: **not approved for cutover**. The running host remains OpenCode v1.
+**No cutover is approved or performed.** Review remediation and isolated qualification do not
+replace the running v1 deployment or modify live user configuration.
 
-## Verified in this run
+## Runtime identities
 
-- Pinned OpenCode CLI 2.0.12 performs actual local MCP mutations.
-- With native `codemode: false`, provider-visible names are
-  `fixture_test_read` and `fixture_test_write`.
-- With Code Mode enabled, catalog discovery returns
-  `tools.fixture.test_write`; execution changes the fixture counter once.
-- Both direct and nested adversarial calls under a deny policy are refused
-  with zero MCP side effects.
-- Four authenticated server-API permission cases observe pending requests
-  and verify approval/rejection before and after the actual MCP mutation.
-  The final local harness reports 28 PASS, zero FAIL, zero BLOCKED.
-- The earlier "MCP unsupported" claim is retracted. Published Core 2.0.12
-  `MCP.tools()` reads the current catalog without waiting for startup;
-  `McpTool` reconciles changes after a 100 ms debounce. Instant-response
-  test sessions ended before the catalog update. A harmless initial tool
-  turn with bounded model-response latency reproduces successful execution.
-- The context builder now enforces its actual JSON size at the final
-  boundary. Accepted state budgets have a minimum of 64 characters;
-  unrepresentable context produces a bounded explicit bypass state.
+| Runtime | Executable SHA-256 | Scope |
+| --- | --- | --- |
+| OpenCode `1.18.31+3b7d74d` | `a27a63046645a409c40559f352267f1b28c241247e915427d41d9cbd8591c7ff` | Unwrapped v1 binary, isolated HOME/XDG |
+| OpenCode `2.0.12` | `2b0825721cb12f9bca3d5099588087d557a21ed2b5b56efebea3f17dc5f79e6a` | Released Linux x64 glibc AVX2 baseline |
+| OpenCode `2.0.12+1b894b926a` | `a3f84d86349cf91c6eb46424f503895fe6e6354d3301fa41d17b1c2554ffbaab` | Staged Nix candidate, not activated |
 
-Runtime investigation evidence (local, disposable):
-`/data/scratch/tmp/opencode/jev-live-azkpPP/wire.json` and `cli.log`.
-The counter contained exactly `write:real-mcp-proof` once.
-Automated reproduction: `scripts/v2-acceptance.mjs`, using the installed
-gateway package and pinned CLI; required checks have no BLOCKED exemption.
+The candidate source is `caniko/opencode@1b894b926a9e69a6211e3f0185d8f51d743a7f89`,
+[OpenCode PR #50528](https://github.com/anomalyco/opencode/pull/50528). Its upstream review is
+separate from gateway review. See [`opencode-candidate.json`](opencode-candidate.json).
 
-## Actual application checks
+## Fresh results from this remediation pass
 
-These use the installed Canix Blender MCP 1.18.0 deployment, not the
-manifest's proposed 1.19.0 pin. They must not qualify the proposed pin.
+| Gate | Result | Evidence / limits |
+| --- | --- | --- |
+| Installed-artifact suite, released v2 | PASS: 36, zero FAIL/BLOCKED | `/data/scratch/tmp/jev-acceptance-909544`; includes explicitly labeled warm-up |
+| Installed-artifact suite, staged candidate | PASS: 36, zero FAIL/BLOCKED | `/data/scratch/tmp/jev-acceptance-993346`; source `c980a17b1a3454339835b7bc83b87fcc5d22c4e9` |
+| Cold first-request readiness, released v2 | FAIL: 8 pass, 12 fail | `/tmp/jev-cold-4h1pEh`; ready fixtures absent from the first roster |
+| Cold first-request readiness, staged candidate | PASS: 20/20 | `/tmp/jev-cold-TuDaQj`; no warm-up, readiness polling, or artificial model delay |
+| v1 proxy compatibility | PASS: three flag configurations | `/tmp/jev-v1-proxy-UlifFD`; default flags and SDK path with Code Mode off/on; each consulted Jev once |
+| Direct MCP and Code Mode | PASS separately | Actual discovery, invocation, allow/deny controls, and exact effects |
+| API permission approval/rejection | PASS separately in both exposure modes | Actual pending requests, zero pre-approval effects, once/reject replies, exact counters |
+| Plugin enable/disable/reenable/reload | PASS | Jev consultations 1/0/1/1; no duplicate hook calls |
+| Cancellation and exact prompt retry | PASS | Before approval: 0 starts/0 commits; before commit: 1/0; after commit: 1/1 |
+| Blender editing, screenshot, save/reopen | PASS | Pinned acceptance bundle; `/data/scratch/tmp/opencode/blender-mcp-acceptance/jev-review-20260922` |
+| Live Blender → OpenCode → Jev → image → model | PASS | Disposable owned instance; eight model requests, five Jev decisions; subsequent retained-image requests bypassed Jev |
+| Live FreeCAD → OpenCode → Jev → image → model | PASS | Disposable owned document; six model requests, two Jev decisions; actual box properties and geometry verified |
+| Live image interpretation | PASS with stated scope | FreeCAD model described the box; Blender model identified the default scene and Quick Setup overlay |
+| Terminal UI approval interaction | NOT EXERCISED | API permission replies above are not evidence of UI rendering or keypress behavior |
+| Host/plugin/configuration migration | NOT PERFORMED | Outside this review pass; production cutover remains unauthorized |
 
-| Gate | Result | Evidence |
-|---|---|---|
-| Packaged Blender protocol | PASS | `BLENDER_MCP_PROTOCOL_OK` |
-| Disposable graphical editing | FAIL | `vector edit kept revision` assertion at `scripts/test-blender-mcp.py:582` |
-| Disposable viewport screenshot | FAIL | Blender allocator failure during screenshot, followed by transport disconnect |
+Both live CAD runs used installed runtime artifact
+`sha256:f7ae8f67c9a8ee0e633c9477d25d7787521a3e5fc446ee17e1b029a73b32512c`, the staged OpenCode binary,
+the existing OpenAI subscription with `gpt-6-astra`, and the existing Jev credential. Credentials
+stayed in memory. The generated documents/processes were owned by the test and disposed afterward.
+No existing CAD document was used.
 
-Disposable state is preserved under:
+- Blender: 5.2.0, MCP 1.18.0 at `37acac7fd25d424b23c8a84f27d6c16c848d810d`, Canix patched
+  immutable bundle `/nix/store/pwpksr04z9znwj2spmkv3impkm89n7fq-blender-mcp-acceptance`.
+  Live evidence: `/data/scratch/tmp/opencode/blender-mcp-acceptance/jev-live-v2-FAbIeL`.
+- FreeCAD: 1.1.3, MCP/addon 0.1.18 at `63acb305573194a011641ab13ccfb391fe95769f`.
+  `ProofBox` measured 2 × 3 × 4 mm, volume approximately 24 mm³, 8 vertices, 12 edges, 6 faces.
+  Live evidence: `/data/scratch/tmp/opencode/blender-mcp-acceptance/jev-live-v2-umzy6D`.
 
-- `/data/scratch/tmp/opencode/jev-production-blender-protocol`
-- `/data/scratch/tmp/opencode/jev-production-blender-graphical`
-- `/data/scratch/tmp/opencode/jev-production-blender-image`
-
-The image run's `blender.log` records `Malloc returns null` in
-`create_cropped_buffer_impl` and a crash report path. The test driver
-owns and cleans up its application processes. Existing user work was not
-selected or edited. A display was available; prior reports claiming no
-graphics support were not supported by this environment.
-
-### Candidate Blender extension and FreeCAD follow-up
-
-`canix cache build .#blender-mcp-extension` realized and privately published
-`/nix/store/dnzwfsv6f789ca3gsp8j8fx4aq43zfp2-blender-mcp-extension-1.18.0`.
-The installed desktop wrapper hardcodes the older extension, so overriding
-its environment did not test the candidate. Launching Blender directly
-with the staged `home/modules/productivity/blender-mcp-startup.py` and the
-candidate extension produced:
-
-- **PASS:** graphical suite, including vector-revision safeguards, in
-  `/data/scratch/tmp/opencode/jev-patched-blender-graphical`.
-- **FAIL:** image gate, now a bounded `no drawable area (-2x26)` error
-  instead of a crash, in `/data/scratch/tmp/opencode/jev-patched-blender-image`.
-  Waiting five seconds for initial redraw did not resolve it; diagnostic
-  evidence: `/data/scratch/tmp/opencode/jev-blender-settled-m9rq5n82`.
-
-A fresh FreeCAD 1.1.3 GUI with installed freecad-mcp 0.1.18 and its addon
-passed MCP document creation, a `Part::Box` operation, exact readback of
-Length=2 mm / Width=3 mm / Height=4 mm, and screenshot capture (3693 bytes).
-Evidence: `/data/scratch/tmp/opencode/jev-freecad-cy6c9ssv`. The isolated
-macro proves PID ownership after binding; existing endpoints are refused.
-The disposable processes were terminated by the driver. This is direct
-application/MCP evidence, not yet an OpenCode/Jev CAD session or a live
-vision-provider qualification.
-
-## Open production gates
-
-- Blender candidate graphical verification passes; the drawable-viewport
-  screenshot gate still needs resolution in its owning workstream.
-- Cold first-request MCP readiness: the bounded warm-up in acceptance is
-  not a production startup synchronization mechanism.
-  A pre-prompt `mcp.list` connected-state poll alone passed once and failed
-  on repetition: it does not wait for the tool-registry debounce. The
-  permission tests retain the explicitly documented bounded first turn.
-- Permission-server acceptance now observes real pending MCP requests and
-  replies `once`/`reject` in both exposure modes, with zero pre-approval
-  mutation and exact final counters. Terminal UI interaction, plugin
-  reload/disposal, and mutation cancellation/retry counters remain unqualified.
-- FreeCAD direct MCP geometry and screenshot checks pass; the complete
-  v2/gateway/live-model workflow remains unqualified.
-- Live model image interpretation has not been run.
-- The Canix consumer still points to upstream 0.3.1 and does not install
-  the new plugin directory. No downstream revision/hash is approved yet.
-- `canix cache build .#jev-gateway` was attempted with the immutable
-  `a93aaaaabdf87198357a8b0fedbd2a2318b4df50` source. Source fetching passed
-  with unpacked NAR hash `sha256-xHxuNC2AjSeAAsunK4VnXtrwpzCJ+yfakGGIb6R0Lgw=`.
-  Dependency fetching was BLOCKED by pnpm 11's minimum-release-age policy:
-  six OpenCode 2.0.12 packages published on September 21 were inside the
-  24-hour cutoff. The policy was not weakened. The experimental consumer
-  edit was reverted; no fake dependency hash remains in Canix.
-- Required local v1 plugin migrations, session/data rollback, server API
-  consumers, and LSP replacement checks remain pre-cutover requirements.
-- Upstream draft PR check rollups must be distinguished from fork master
-  CI. No upstream approval or independent production approval is claimed.
-
-Do not deploy using hashes copied from older handoffs. Calculate and
-evaluate a new immutable consumer only after its exact source is accepted.
+Evidence directories are local; raw conversation/debug dumps and credentials are not committed.
+Fork CI, upstream CI approval, maintainer review, terminal UI approval, and production migration
+remain distinct. Use the current fork workflow run for the final published revision's status.

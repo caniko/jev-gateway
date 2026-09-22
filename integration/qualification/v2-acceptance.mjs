@@ -623,14 +623,15 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--continue", "--session", id, "and again"]);
   const after = modelLog().slice(before).filter((e) => e.url?.startsWith("/v1/chat/completions"));
   const last = after.at(-1);
-  let grew = false, noRefs = true;
+  let grew = false, noRefs = true, noStaleHints = false;
   try {
     const j = JSON.parse(last.body);
     grew = (j.messages?.length ?? 0) > 2;
     noRefs = !JSON.stringify(j).includes("previous_response_id");
+    noStaleHints = !JSON.stringify(j.messages).includes("[jev-routing]");
   } catch {}
-  if (r.code === 0 && grew && noRefs) report("multi-turn-continuity", "PASS", "full history resent, no server refs");
-  else fail("multi-turn-continuity", `exit=${r.code} grew=${grew} noRefs=${noRefs}`);
+  if (r.code === 0 && grew && noRefs && noStaleHints) report("multi-turn-continuity", "PASS", "full history resent, no server refs or persisted advisory hints");
+  else fail("multi-turn-continuity", `exit=${r.code} grew=${grew} noRefs=${noRefs} noStaleHints=${noStaleHints}`);
 }
 {
   // First prove this exact native tool works; missing tools are not permission evidence.

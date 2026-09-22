@@ -23,7 +23,7 @@
 //   branch history; reintegration stays an explicit merge.
 // - Repeated runs are idempotent: same inputs, same verdict.
 // - --self-test builds throwaway fixture repos exercising squash landing,
-//   descendant retention, stale heads, conflicts, and repeat runs.
+//   prerequisite ancestry, descendant retention, and conflicts.
 //
 // Candidate commits use the ambient git identity with no overrides (a
 // worktree `git config` would land in the shared repository config, and -c
@@ -64,6 +64,24 @@ function ghPrMeta(repo, id) {
   const out = execFileSync("gh", ["api", `repos/${repo}/pulls/${id}`, "--jq",
     "{merged:.merged,sha:.merge_commit_sha,state:.state,head:.head.sha}"], { encoding: "utf8", timeout: 20000 });
   return JSON.parse(out);
+}
+
+function prerequisiteFailures(p, manifest, metadata, isAncestor) {
+  const errors = [];
+  const ancestors = p.ownDeltaBase ? [p.ownDeltaBase] : [];
+  for (const name of p.dependencies ?? []) {
+    const dependency = manifest.prs.find((item) => item.branch === name);
+    if (!dependency) { errors.push(`PR #${p.id}: unknown dependency ${name}`); continue; }
+    const status = metadata.get(dependency.id);
+    ancestors.push(status?.merged ? status.sha : dependency._fetched ?? dependency.headSha);
+    if (!status?.merged && manifest.order.indexOf(name) >= manifest.order.indexOf(p.branch)) {
+      errors.push(`PR #${p.id}: dependency ${name} must precede it in integration order`);
+    }
+  }
+  for (const ancestor of ancestors) {
+    if (!isAncestor(ancestor, p._fetched)) errors.push(`PR #${p.id}: declared prerequisite/base ${ancestor} is not an ancestor of ${p._fetched}`);
+  }
+  return errors;
 }
 
 function runCheck() {
@@ -122,6 +140,14 @@ function runCheck() {
 
   const landed = pending.filter((p) => prMeta.get(p.id)?.merged);
   const remaining = pending.filter((p) => !prMeta.get(p.id)?.merged);
+
+  // Declared prerequisites must be actual ancestors, not just prose in a PR body.
+  for (const p of remaining) {
+    prerequisiteFailures(p, manifest, prMeta, (ancestor, head) => {
+      try { git(["merge-base", "--is-ancestor", ancestor, head]); return true; } catch { return false; }
+    }).forEach(bad);
+  }
+  if (failures) return false;
 
   // 4. squash-reintroduction guard: a remaining branch built on a landed
   // PR's pre-land head without containing the landed merge would silently
@@ -220,8 +246,8 @@ function runCheck() {
   return true;
 }
 
-// --self-test: throwaway fixture repos exercising squash landing, ----------
-// descendant retention, stale heads, conflicts, and repeat idempotency.
+// --self-test: throwaway fixture repos exercising squash landing,
+// prerequisite ancestry, descendant retention, and conflicts.
 function selfTest() {
   const tmp = mkdtempSync(join(tmpdir(), "jev-sync-selftest-"));
   const sh = (cmd, cwd = tmp) => execFileSync("sh", ["-c", cmd], { encoding: "utf8", cwd });
@@ -263,12 +289,17 @@ function selfTest() {
       const featHead = sh(`git -C origin rev-parse feature`).trim();
       // Guard logic under test: descendant has old head, lacks merge.
       const has = (a, b) => { try { sh(`git -C origin merge-base --is-ancestor ${a} ${b}`); return true; } catch { return false; } };
+      const dependencyManifest = { order: ["feature", "descendant"], prs: [{ id: 1, branch: "feature", headSha: featHead }] };
+      const dependent = { id: 2, branch: "descendant", _fetched: "descendant", dependencies: ["feature"] };
+      t("real-prerequisite-accepted", prerequisiteFailures(dependent, dependencyManifest, new Map(), has).length === 0);
       t("squash-descendant-detected", has(featHead, "descendant") && !has(mergeSha, "descendant"));
       // After rebasing the descendant, the guard clears.
       // Squash breaks patch-identity, so plain `rebase main` would replay
       // feature commits; --onto selects exactly the descendant's own commit.
       sh(`cd origin && git checkout -q descendant && git rebase -q --onto main feature descendant`, tmp);
       t("rebased-descendant-clears", has(mergeSha, "descendant"));
+      t("stale-prerequisite-rejected", prerequisiteFailures(dependent, dependencyManifest, new Map(), has).some((error) => error.includes("not an ancestor")));
+      t("landed-prerequisite-accepted", prerequisiteFailures(dependent, dependencyManifest, new Map([[1, { merged: true, sha: mergeSha }]]), has).length === 0);
       // Conflict path: two branches rewriting the same line must fail to merge.
       sh(`cd origin && git checkout -qb sideA main && perl -pi -e 's/^base$/sideA/' f.txt && git commit -qam sideA`, tmp);
       sh(`cd origin && git checkout -qb sideB main && perl -pi -e 's/^base$/sideB/' f.txt && git commit -qam sideB`, tmp);
@@ -276,20 +307,12 @@ function selfTest() {
       try { sh(`cd origin && git checkout -q sideA && git merge --no-commit sideB`, tmp); } catch { conflicted = true; }
       sh(`cd origin && git merge --abort 2>/dev/null; git checkout -q main; true`, tmp);
       t("conflict-detected", conflicted);
-      // Repeat idempotency: same query twice, same answer.
-      const twice = [has(mergeSha, "descendant"), has(mergeSha, "descendant")];
-      t("repeat-idempotent", twice[0] === twice[1]);
     }
-    // Stale-head comparison semantics (no commits needed).
-    t("stale-head-inequality", "aaa" !== "bbb");
-    // Manifest round-trip: retired entries serialize with mergedSha.
-    const m = { upstream: { baseSha: "x" }, prs: [{ id: 1, branch: "feature", state: "merged", mergedSha: "x" }] };
-    t("manifest-roundtrip", JSON.parse(JSON.stringify(m)).prs[0].mergedSha === "x");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
   console.log(`\nself-test: ${pass} passed, ${failures} failed, ${blocked} blocked`);
-  process.exitCode = failures ? 1 : 0;
+  process.exitCode = failures || blocked ? 1 : 0;
 }
 
 if (SELF_TEST) {
