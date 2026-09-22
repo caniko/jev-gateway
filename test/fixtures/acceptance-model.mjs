@@ -9,6 +9,7 @@
 // Env: PORT, LOG (request log), SCENARIO_FILE (toolmode path).
 import { createServer } from "node:http";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { modelContractError } from "./model-contract.mjs";
 
 const PORT = Number(process.env.PORT ?? 18082);
 const LOG = process.env.LOG ?? "./model-requests.log";
@@ -48,6 +49,13 @@ const wantsTool = (raw) => {
   try {
     const j = JSON.parse(raw);
     if (!j.tools || !j.tools.length) return undefined;
+    if (j.tool_choice === "none") return undefined;
+    if (spec.name === "@status") {
+      const calls = (j.messages ?? []).flatMap((m) => m.tool_calls ?? []);
+      if (!calls.length) return { name: "read", args: JSON.stringify({ path: JSON.parse(spec.args).warmup }) };
+      if (calls.some((c) => c.function?.name === "fixture_test_status")) return undefined;
+      return { name: "fixture_test_status", args: "{}" };
+    }
     if (spec.name === "@mcp") {
       const scenario = JSON.parse(spec.args);
       const messages = j.messages ?? [];
@@ -73,7 +81,7 @@ const wantsTool = (raw) => {
     }
     if ((j.input || []).some((it) => typeof it?.type === "string" && it.type.endsWith("_call_output"))) return undefined;
     if ((j.messages || []).some((m) => m.role === "tool")) return undefined;
-    return spec;
+    return spec.name === "@adversarial-write" ? { name: "write", args: spec.args } : spec;
   } catch {
     return undefined;
   }
@@ -179,6 +187,14 @@ createServer((req, res) => {
     };
     appendFileSync(LOG, JSON.stringify(entry) + "\n");
     const spec = wantsTool(body);
+    const scripted = toolSpec();
+    const adversarial = scripted?.name === "@adversarial-write" || (scripted?.name === "@mcp" && JSON.parse(scripted.args).denied === true);
+    const contractError = modelContractError(JSON.parse(body || "{}"), spec, adversarial);
+    if (contractError) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `acceptance fixture contract: ${contractError}` } }));
+      return;
+    }
     let payload = chatText();
     let contentType = "application/json";
     if (req.url.startsWith("/v1/responses")) {

@@ -27,12 +27,13 @@ Binary source: `--binary PATH`, `OPENCODE_V2_BIN`, or `--install-binary`
 access only). Without a usable binary every binary-driven check reports
 BLOCKED. `GATEWAY_ROOT` selects the gateway build under test.
 
-Current checks (28): installed artifact (pack digest recorded, gateway
+Current checks (36): installed artifact (full pack digest and source SHA recorded, gateway
 and plugin both run from the production-dependency installation), version,
 text roundtrip, native tool call/result linkage, MCP connection
-(server-log evidence that the fixture connected with 2 tools), MCP
+(server-log evidence that the fixture connected with 3 tools), MCP
 invocation and denial in direct and Code Mode configurations, selection through the real binary +
-gateway (forced `tool_choice`), plugin influence (the configured
+gateway (forced `tool_choice` plus a unique readback marker), direct synthesis
+(one MCP status invocation, its real result, and one skipped model request), plugin influence (the configured
 plugin's `[jev-routing]` hint reaches model traffic and the session
 completes — proving plugin load and request annotation), plugin
 fail-open (dead gateway leaves the run untouched with no hint),
@@ -47,11 +48,19 @@ the supported v2 server API against a fresh authenticated local server:
 observe a pending MCP request, assert the counter is empty, then reply
 `once` or `reject` and check the exact final counter, in both exposure modes.
 
-The 2026-09-22 local run passed 28 checks with zero failures and zero
-blocked checks. This verifies the permission decision API, not the terminal
-approval UI. It does not establish reload/disposal or exactly-once
-application mutations under cancellation;
-those remain required production qualifications, distinct from these checks.
+Four lifecycle cases keep the same server alive while enabling, disabling,
+reenabling, and reloading the plugin; each requires exactly one Jev call
+when enabled and zero when disabled. Three mutation checkpoints interrupt
+before approval, before commit, or after commit/before the result, then
+retry the exact admitted prompt ID. Started/committed/cancelled event counts
+and final state must match exactly; the committed case must not replay.
+
+Both the released 2.0.12 baseline and the source-built readiness candidate
+passed all 36 checks locally. Permission decisions use the API rather than
+terminal UI automation. The scripted model validates advertised tools and
+`tool_choice`; only explicitly named adversarial scenarios may violate the
+advertised roster. Plugin tests use a direct provider path, not accidental
+plugin-plus-proxy routing.
 
 The earlier claim that 2.0.12 cannot expose MCP tools was incorrect. The
 instant-response fixture raced startup and catalog reconciliation. The
@@ -61,6 +70,23 @@ with bounded response latency, then uses the actual exposed catalog.
 `tools.fixture.test_write`. Both execute a unique counter mutation exactly
 once. Adversarial calls under deny must leave that counter empty. No
 BLOCKED result is exempt from the deterministic acceptance gate.
+
+## First-turn readiness qualification
+
+`scripts/v2-cold-start.mjs` requires explicit `OPENCODE_V2_BIN`,
+`OPENCODE_V2_VERSION`, and `OPENCODE_V2_SHA256`. It runs 20 isolated trials:
+immediate, 150 ms, and 500 ms MCP startup; disabled server; and a configured
+startup timeout. It has no warm-up call, status poll, or model latency.
+Every enabled-server first request must advertise the tool and execute it
+once; disabled/failed servers must remain bounded and execute nothing.
+
+The released 2.0.12 binary failed 12/20 trials. The candidate from
+`caniko/opencode@1b894b926a9e69a6211e3f0185d8f51d743a7f89`
+([upstream PR #50528](https://github.com/anomalyco/opencode/pull/50528))
+passed 20/20. `v2-acceptance.mjs --runtime-pin=FILE` accepts an explicit
+`{version,sha256,firstTurnReady}` pin for this separately built executable;
+`firstTurnReady:true` removes the warm-up from the MCP permission cases.
+It does not change the installed host binary or imply web UI qualification.
 
 ## B. Real application (gated, disposable)
 
