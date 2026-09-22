@@ -10,7 +10,8 @@ interface ResponsesTool {
   type: string;
   name?: string;
   description?: string;
-  parameters?: JsonSchema;
+  /** Responses allows `null`, which the API defines the same as an omitted key. */
+  parameters?: JsonSchema | null;
   /** `type: "namespace"` groups tools; the group's name is part of how the model addresses them. */
   tools?: ResponsesTool[];
 }
@@ -84,7 +85,8 @@ function toTools(raw: ResponsesTool[]): RouterTool[] {
         kind: tool.type,
         name,
         description: group ? `[${group}] ${tool.description ?? ""}`.trim() : tool.description,
-        parameters: tool.type === "function" ? tool.parameters : undefined,
+        parameters: tool.type === "function"
+          ? (tool.parameters ?? { type: "object", properties: {} }) : undefined,
         ...(name === tool.name ? {} : { namespace: namespace?.name }),
       });
     } else if (tool.type && !tools.has(tool.type)) {

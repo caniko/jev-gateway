@@ -34,20 +34,98 @@ export interface ToolPlan {
   closedParams?: ClosedParam[];
 }
 
+/** Own-property plain object: a schema built with `Object.create` must not inherit assertions. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+const TYPES = new Set(["null", "boolean", "string", "number", "integer", "array", "object"]);
+
+function validType(type: unknown): boolean {
+  return type === undefined || (typeof type === "string" && TYPES.has(type))
+    || (Array.isArray(type) && type.length > 0 && new Set(type).size === type.length
+      && type.every((item) => typeof item === "string" && TYPES.has(item)));
+}
+
+function matchesType(value: Json, type: JsonSchema["type"]): boolean {
+  if (type === undefined) return true;
+  const types = Array.isArray(type) ? type : [type];
+  return types.some((item) => item === "null" ? value === null
+    : item === "integer" ? typeof value === "number" && Number.isInteger(value)
+    : item === "array" ? Array.isArray(value)
+    : item === "object" ? isRecord(value)
+    : typeof value === item);
+}
+
+/**
+ * Whether a schema stays inside the subset this gateway implements — checked at plan time, before
+ * Jev is asked anything. One that does not hands the whole call to the LLM with the schema
+ * forwarded byte for byte, so no keyword is ever enforced by code that ignores it: `$ref`,
+ * composition, `format`, `nullable`, numeric bounds, and boolean schemas all fail here.
+ * `keys` are the assertions the caller implements; everything not listed below is unimplemented.
+ */
+function supportedSchema(value: unknown, keys: string[]): value is JsonSchema {
+  if (!isRecord(value) || !validType(value.type)) return false;
+  return Object.entries(value).every(([key, item]) => {
+    // Annotations assert nothing, so only the one that is read back (`description`) has to have
+    // the type its reader expects. `$schema` and `$id` belong here too: OpenCode stamps the first
+    // on every native tool and the TypeScript SDK on every MCP server, and neither constrains a
+    // value — a tool carrying them is as answerable as one that does not.
+    if (["title", "description", "$comment", "$schema", "$id"].includes(key)) return typeof item === "string";
+    if (["deprecated", "readOnly", "writeOnly"].includes(key)) return typeof item === "boolean";
+    if (key === "default") return true; // never applied, so its own value is never read
+    if (key === "examples") return Array.isArray(item);
+    return keys.includes(key);
+  });
+}
+
+/** JSON Schema compares object values without key order and treats negative zero as zero. */
+function valueKey(value: Json): string {
+  return JSON.stringify(value, (_key, item: unknown) => isRecord(item)
+    ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) : item);
+}
+
+/**
+ * One parameter Jev can fill without help: a fixed set small enough to offer as choices, and a
+ * schema this gateway fully implements. Anything it cannot stand behind returns `undefined` and
+ * keeps that argument — the whole call — with the LLM, schema untouched.
+ */
 function closedParam(name: string, schema: JsonSchema, required: boolean): ClosedParam | undefined {
-  if ("const" in schema) return { name, required, kind: "const", value: schema.const as Json };
-  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
-    if (schema.enum.length === 1) return { name, required, kind: "const", value: schema.enum[0]! };
+  if (!supportedSchema(schema, ["type", "const", "enum"])) return undefined;
+  const hasConst = Object.hasOwn(schema, "const");
+  if (hasConst && !matchesType(schema.const as Json, schema.type)) return undefined;
+
+  if (Object.hasOwn(schema, "enum")) {
+    const list = schema.enum as Json[];
+    // The cap comes first: a Choice accepts 255 options, so a longer enum is refused on its
+    // length alone, before anything walks it.
+    if (!Array.isArray(list) || list.length === 0 || list.length > 255) return undefined;
+    // One pass builds the labels Jev sees. Colliding labels ("1" vs 1, or two objects, which all
+    // label as "[object Object]") cannot be mapped back to their values — that collision check is
+    // also the duplicate check — and every member must match the declared type.
     const values = new Map<string, Json>();
-    for (const value of schema.enum) {
-      if (value !== null && typeof value === "object") return undefined;
+    for (const value of list) {
+      if (!matchesType(value, schema.type)) return undefined;
+      if (isRecord(value) && !hasConst) return undefined;
       values.set(String(value), value);
     }
-    // Labels are what Jev sees; colliding labels ("1" vs 1) can't be mapped back.
-    if (values.size !== schema.enum.length || values.size > 255) return undefined;
+    if (values.size !== list.length) return undefined;
+    if (hasConst) {
+      const constant = schema.const as Json;
+      // Scalars compare through their label; only objects need key-order-insensitive equality.
+      const inEnum = isRecord(constant)
+        ? list.some((member) => valueKey(member) === valueKey(constant))
+        : values.get(String(constant)) === constant;
+      return inEnum ? { name, required, kind: "const", value: constant } : undefined;
+    }
+    if (list.length === 1) return { name, required, kind: "const", value: list[0]! };
     return { name, required, kind: "enum", description: schema.description, values };
   }
-  if (schema.type === "boolean") return { name, required, kind: "boolean", description: schema.description };
+  if (hasConst) return { name, required, kind: "const", value: schema.const as Json };
+  if (schema.type === "boolean" || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === "boolean")) {
+    return { name, required, kind: "boolean", description: schema.description };
+  }
   return undefined;
 }
 
@@ -56,8 +134,13 @@ export function planTool(tool: RouterTool): ToolPlan {
   // Only function tools take JSON arguments, and without a recognizable object schema
   // there is nothing safe to infer about them.
   if (tool.kind !== "function") return { name: tool.name };
-  if (schema && schema.type !== undefined && schema.type !== "object") return { name: tool.name };
-  const required = new Set(schema?.required ?? []);
+  if (!supportedSchema(schema, ["type", "properties", "required", "additionalProperties"]) || !matchesType({}, schema.type)) return { name: tool.name };
+  if (Object.hasOwn(schema, "properties") && !isRecord(schema.properties)) return { name: tool.name };
+  if (Object.hasOwn(schema, "required") && (!Array.isArray(schema.required) || !schema.required.every((name) => typeof name === "string")
+    || new Set(schema.required).size !== schema.required.length)) return { name: tool.name };
+  if (Object.hasOwn(schema, "additionalProperties") && typeof schema.additionalProperties !== "boolean") return { name: tool.name };
+  const required = new Set(schema.required ?? []);
+  if ([...required].some((name) => !Object.hasOwn(schema.properties ?? {}, name))) return { name: tool.name };
   const closedParams: ClosedParam[] = [];
   for (const [name, property] of Object.entries(schema?.properties ?? {})) {
     const param = closedParam(name, property, required.has(name));

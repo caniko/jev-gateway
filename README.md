@@ -304,12 +304,14 @@ Expected modes (reported in `x-jev-gateway-mode`):
 | `forced` | Jev picked a tool but some arguments are open-ended, so the LLM fills them in |
 | `none` | Jev is confident no tool is needed (`tool_choice: "none"`) |
 | `passthrough` | Low confidence, Jev failed, no tools, or the caller already decided. Forwarded untouched |
-| `direct` | Jev picked a tool and every argument is an enum, boolean, or constant. Answered with no LLM call |
+| `direct` | Jev picked a tool, every argument is an enum, boolean, or constant, and the schema is one the gateway can check on its own. Answered with no LLM call |
 
 Most OpenCode tools take open text (`bash` takes a command, `read` takes a path), so `forced`
 is the usual outcome: Jev picks the tool and the LLM fills in the free-form arguments. `direct`
 needs a fully closed schema (only enums, booleans, or constants), which fits small MCP-style tools
-with fixed choices rather than everyday file and shell tools.
+with fixed choices rather than everyday file and shell tools. What counts as a schema the gateway
+can check on its own is spelled out under [How it works](#how-it-works); the rule is the same for
+every client, not an OpenCode one.
 
 The launcher sets `OPENCODE_EXPERIMENTAL_NATIVE_LLM=false` and
 `OPENCODE_EXPERIMENTAL_CODE_MODE=false` for the launched process only. Those experimental modes
@@ -398,11 +400,24 @@ and the value of every closed-set argument. The answer selects a mode, which is 
 
 | Mode | When | What happens |
 | --- | --- | --- |
-| `direct` | Jev is confident about the tool and every argument is an enum, boolean, or constant | The gateway builds the tool call itself, streaming included. **No LLM call.** |
+| `direct` | Jev is confident about the tool, every argument is an enum, boolean, or constant, and the schema is one the gateway can check on its own | The gateway builds the tool call itself, streaming included. **No LLM call.** |
 | `forced` | Jev is confident about the tool, but some arguments are open-ended | Forwarded with `tool_choice` set to that tool, so the LLM only fills in arguments. `ARGS_MODEL` can send these to a cheaper model |
 | `hint` | Jev is confident, but `tool_choice` cannot be changed (Anthropic with thinking on, or a cached conversation) | Forwarded with a one-line suggestion added after the client's last block, so cached prefixes stay valid |
 | `none` | Jev is confident that no tool is needed | Forwarded with `tool_choice: "none"` |
 | `passthrough` | Low confidence, the two checks disagree, Jev failed, there are no tools, or the caller already chose | Forwarded byte for byte. `x-jev-gateway-reason` says why |
+
+Whether a schema can be checked on its own is decided before Jev is asked anything. A schema
+qualifies when it describes an object with `properties`, `required`, and boolean
+`additionalProperties` (the object type may be omitted) whose properties are constants, scalar
+enums, or booleans with matching declared types or type unions. Annotations constrain nothing, so
+their values are never read: `title`, `description`, `default`, `examples`, `$comment`,
+`deprecated`, `readOnly`, `writeOnly`, and the `$schema`/`$id` that OpenCode, the TypeScript SDK,
+and every other generator stamp on their output. Defaults are never applied, optional arguments
+can remain absent, and OpenAI function tools may omit `parameters` — Responses may send
+`parameters: null` — to declare no arguments. Anything else (`$ref`, composition, `format`,
+`nullable`, numeric bounds, malformed or contradictory closed values, ambiguous enum labels) hands
+the whole call to the LLM, schema forwarded unchanged: the gateway never enforces a keyword it
+does not implement, and nothing above applies to only one client.
 
 Tool lists longer than 120 entries (Claude Code sends about 280) take two Jev calls. The first ranks
 the list in groups. The second decides among the top 3 of each group, using full descriptions.
