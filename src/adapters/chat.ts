@@ -1,9 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Decision } from "../decide.js";
-import { hasChatMultimodal, MULTIMODAL_SKIP } from "../multimodal.js";
-import { textOf, truncate } from "../state.js";
+import { textOf } from "../state.js";
 import type { ChatRequest, DirectCall, RouterInput, RouterTool, ToolDef, Turn } from "../types.js";
 import { sse, type Adapter } from "./adapter.js";
+import { hasChatMultimodal, MULTIMODAL_SKIP } from "../multimodal.js";
 
 /** OpenAI Chat Completions (`POST /v1/chat/completions`). */
 
@@ -18,7 +18,8 @@ function toTools(rawTools: ToolDef[]): RouterTool[] {
   for (const tool of rawTools) {
     if (tool.type === "function") {
       const { name, description, parameters } = tool.function!;
-      tools.push({ kind: "function", name, description, parameters });
+      tools.push({ kind: "function", name, description,
+        parameters: Object.hasOwn(tool.function!, "parameters") ? parameters : { type: "object", properties: {} } });
     } else if (tool.custom?.name) {
       tools.push({ kind: "hosted", name: tool.custom.name, description: tool.custom.description });
     } else if (!builtIns.has(tool.type)) {
@@ -51,17 +52,15 @@ function toInput(req: ChatRequest, maxMessageChars: number): RouterInput | { ski
   const system: string[] = [];
   const turns: Turn[] = [];
   for (const message of req.messages) {
-    const text = truncate(textOf(message.content), maxMessageChars);
+    const text = textOf(message.content);
     if (message.role === "system" || message.role === "developer") {
       if (text) system.push(text);
     } else if (message.role === "tool") {
       turns.push({
         role: "tool_result",
+        ...(typeof message.tool_call_id === "string" ? { call_id: message.tool_call_id } : {}),
         tool: toolNameByCallId.get(message.tool_call_id ?? "") ?? "unknown",
         content: text,
-        // Preserved so the state builder can verify call/result association
-        // instead of matching on names alone.
-        ...(message.tool_call_id ? { call_id: message.tool_call_id } : {}),
       });
     } else if (message.tool_calls?.length) {
       turns.push({
@@ -69,8 +68,8 @@ function toInput(req: ChatRequest, maxMessageChars: number): RouterInput | { ski
         ...(text ? { text } : {}),
         tool_calls: message.tool_calls.map((call) => ({
           tool: call.function.name,
-          arguments: truncate(call.function.arguments, maxMessageChars),
-          call_id: call.id,
+          ...(typeof call.id === "string" ? { call_id: call.id } : {}),
+          arguments: call.function.arguments,
         })),
       });
     } else {

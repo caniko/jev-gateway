@@ -73,16 +73,11 @@ function opencodeUpstream() {
   return process.env.JEV_OPENCODE_UPSTREAM_BASE_URL ?? "https://api.openai.com/v1";
 }
 
-/** Model id selected as `jev-gateway/<model>`; override with JEV_OPENCODE_MODEL. */
-function opencodeModel() {
-  return process.env.JEV_OPENCODE_MODEL ?? "gpt-5";
-}
-
 const OPENCODE_PROVIDER = "jev-gateway";
 
 /**
  * Custom-provider config for the launched OpenCode process, verified against
- * the pinned binary (`@opencode/cli@2.0.12`, see docs/opencode-v2.md).
+ * the pinned binary (`@opencode/cli@2.0.12`, see README).
  * Injected through OPENCODE_CONFIG_CONTENT — inline config merges over the
  * user's global/project files, which are never written. The provider entry
  * uses the shape 2.0.12 honors (`npm: "@ai-sdk/openai-compatible"` with
@@ -113,19 +108,21 @@ const OPENCODE_PROVIDER = "jev-gateway";
 function opencodeInlineConfig(origin) {
   const forced = process.env.JEV_OPENCODE_MODEL;
   const inherited = inheritedInlineConfig();
+  const object = (value, path) => {
+    if (value === undefined) return {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`OpenCode ${path} must be an object`);
+    return value;
+  };
+  const providers = object(inherited?.provider, "provider");
   const inheritedId =
     typeof inherited?.model === "string" && inherited.model.startsWith(`${OPENCODE_PROVIDER}/`)
       ? inherited.model.slice(OPENCODE_PROVIDER.length + 1)
       : undefined;
-  const model = forced || inheritedId || opencodeModel();
-  const inheritedEntry =
-    inherited?.provider?.[OPENCODE_PROVIDER] && typeof inherited.provider[OPENCODE_PROVIDER] === "object"
-      ? inherited.provider[OPENCODE_PROVIDER]
-      : {};
-  const inheritedOptions =
-    inheritedEntry.options && typeof inheritedEntry.options === "object" && !Array.isArray(inheritedEntry.options)
-      ? inheritedEntry.options
-      : {};
+  const model = forced || inheritedId || "gpt-5";
+  const inheritedEntry = object(providers[OPENCODE_PROVIDER], "provider.jev-gateway");
+  const inheritedOptions = object(inheritedEntry.options, "provider.jev-gateway.options");
+  const models = object(inheritedEntry.models, "provider.jev-gateway.models");
+  const selectedModel = object(models[model], `provider.jev-gateway.models.${model}`);
   const provider = {
     ...inheritedEntry,
     npm: "@ai-sdk/openai-compatible",
@@ -134,22 +131,15 @@ function opencodeInlineConfig(origin) {
     // points at this gateway (otherwise routing silently breaks), and the
     // credential defaults to the documented mechanism only when absent.
     options: { ...inheritedOptions, baseURL: `${origin}/v1`, apiKey: inheritedOptions.apiKey ?? "{env:OPENAI_API_KEY}" },
-    models: { [model]: { name: `Jev Gateway (${model})` } },
+    models: { ...models, [model]: { name: `Jev Gateway (${model})`, ...selectedModel } },
   };
-  // Model selection: an explicit JEV_OPENCODE_MODEL always wins; an empty
-  // string omits both keys so file-stored configuration wins instead; an
-  // inherited non-gateway model is preserved; otherwise the launcher
-  // default routes through Jev.
-  const omit = forced === "";
-  const selected = forced && !omit ? `${OPENCODE_PROVIDER}/${model}` : (inherited?.model ?? `${OPENCODE_PROVIDER}/${model}`);
-  const selectedSmall = forced && !omit
-    ? `${OPENCODE_PROVIDER}/${model}`
-    : (inherited?.small_model ?? `${OPENCODE_PROVIDER}/${model}`);
+  // Empty means no selection override, not deletion of inline or file-based settings.
+  const select = forced || (forced === undefined && inherited?.model === undefined && inherited?.small_model === undefined);
   return {
     ...(inherited ?? {}),
     $schema: "https://opencode.ai/config.json",
-    ...(omit ? {} : { model: selected, small_model: selectedSmall }),
-    provider: { ...inherited?.provider, [OPENCODE_PROVIDER]: provider },
+    ...(select ? { model: `${OPENCODE_PROVIDER}/${model}`, small_model: `${OPENCODE_PROVIDER}/${model}` } : {}),
+    provider: { ...providers, [OPENCODE_PROVIDER]: provider },
   };
 }
 
@@ -181,6 +171,7 @@ export const opencode = {
   // not replaced; obsolete v1 experimental flags are not set.
   env: (origin) => ({
     OPENCODE_CONFIG_CONTENT: JSON.stringify(opencodeInlineConfig(origin)),
+    JEV_OPENCODE_ROUTING_OWNER: "proxy",
   }),
   configHelp: (origin) => {
     // No OPENCODE_CONFIG_CONTENT one-liner here: single-quoting raw JSON breaks when a custom
@@ -220,4 +211,3 @@ export const gemini = {
     `#   GEMINI_API_BASE=${origin}\n` +
     `#   or endpoint: ${origin}/v1beta\n`,
 };
-

@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import type { Decision } from "../decide.js";
-import { hasResponsesMultimodal, MULTIMODAL_SKIP } from "../multimodal.js";
-import { textOf, truncate } from "../state.js";
+import { textOf } from "../state.js";
 import type { DirectCall, JsonSchema, RouterInput, RouterTool, Turn } from "../types.js";
 import { sse, type Adapter } from "./adapter.js";
+import { hasResponsesMultimodal, MULTIMODAL_SKIP } from "../multimodal.js";
 
 /** OpenAI Responses API (`POST /v1/responses`) — the only wire format Codex speaks. */
 
@@ -85,7 +85,8 @@ function toTools(raw: ResponsesTool[]): RouterTool[] {
         kind: tool.type,
         name,
         description: group ? `[${group}] ${tool.description ?? ""}`.trim() : tool.description,
-        parameters: tool.type === "function" ? tool.parameters : undefined,
+        parameters: tool.type === "function"
+          ? (Object.hasOwn(tool, "parameters") ? tool.parameters : { type: "object", properties: {} }) : undefined,
         ...(name === tool.name ? {} : { namespace: namespace?.name }),
       });
     } else if (tool.type && !tools.has(tool.type)) {
@@ -105,7 +106,6 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
   if (req.previous_response_id) return { skip: "previous_response_id" };
   if (hasResponsesMultimodal(req.input)) return { skip: MULTIMODAL_SKIP };
   const items = inputItems(req);
-  const clip = (value: unknown) => truncate(typeof value === "string" ? value : textOf(value), maxMessageChars);
 
   const toolNameByCallId = new Map<string, string>();
   const system = typeof req.instructions === "string" && req.instructions ? [req.instructions] : [];
@@ -113,7 +113,7 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
   for (const item of items) {
     const type = item.type ?? (item.role ? "message" : undefined);
     if (type === "message") {
-      const text = clip(item.content);
+      const text = textOf(item.content);
       if (item.role === "system" || item.role === "developer") {
         if (text) system.push(text);
       } else {
@@ -124,32 +124,20 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
       if (item.call_id) toolNameByCallId.set(item.call_id, name);
       turns.push({
         role: "assistant",
-        tool_calls: [
-          {
-            tool: name,
-            arguments: clip(item.arguments ?? item.input ?? ""),
-            ...(item.call_id ? { call_id: item.call_id } : {}),
-          },
-        ],
+        tool_calls: [{ tool: name, ...(typeof item.call_id === "string" ? { call_id: item.call_id } : {}), arguments: textOf(item.arguments ?? item.input ?? "") }],
       });
     } else if (type === "local_shell_call") {
       if (item.call_id) toolNameByCallId.set(item.call_id, "local_shell");
       turns.push({
         role: "assistant",
-        tool_calls: [
-          {
-            tool: "local_shell",
-            arguments: clip((item.action?.command ?? []).join(" ")),
-            ...(item.call_id ? { call_id: item.call_id } : {}),
-          },
-        ],
+        tool_calls: [{ tool: "local_shell", ...(typeof item.call_id === "string" ? { call_id: item.call_id } : {}), arguments: (item.action?.command ?? []).join(" ") }],
       });
     } else if (type?.endsWith("_call_output")) {
       turns.push({
         role: "tool_result",
+        ...(typeof item.call_id === "string" ? { call_id: item.call_id } : {}),
         tool: toolNameByCallId.get(item.call_id ?? "") ?? "unknown",
-        content: clip(item.output),
-        ...(item.call_id ? { call_id: item.call_id } : {}),
+        content: textOf(item.output),
       });
     }
     // Reasoning items (encrypted), item references and hosted-tool traces carry nothing Jev can read.
@@ -161,11 +149,7 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
     turns,
     tools: toTools(declaredTools(req)),
     toolChoice: choice === "auto" || choice === "required" ? choice : "decided",
-    // A stored session may later chain from previous_response_id, and the
-    // Responses API stores by default when `store` is omitted: the
-    // gateway's synthetic direct reply is explicitly unstored, so direct
-    // mode runs only on explicit `store: false` while forced/hint
-    // delegation still applies everywhere else.
+    // Stored sessions need real provider IDs; Responses stores by default.
     ...(req.store === false ? {} : { allowDirect: false }),
   };
 }

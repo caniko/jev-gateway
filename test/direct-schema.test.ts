@@ -1,158 +1,81 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { planTool } from "../src/questions.js";
-import { validateDirectArgs } from "../src/schema.js";
 import { fakeJev, fakeUpstream, testConfig } from "./helpers.js";
 
-const closedTool = (name: string, parameters: any) => ({
-  kind: "function" as const,
-  name,
-  description: `${name} tool`,
-  parameters,
-});
+async function route(parameters: unknown, extraAnswers = {}, omit = false) {
+  const jev = fakeJev({ tool: { choice: "status" }, needs_tool: { noul: 0.99 }, ...extraAnswers });
+  const upstream = fakeUpstream();
+  const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+  const body = { model: "m", messages: [{ role: "user", content: "status" }],
+    tools: [{ type: "function", function: { name: "status", ...(omit ? {} : { parameters }) } }] };
+  const response = await app.request("/v1/chat/completions", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  return { mode: response.headers.get("x-jev-gateway-mode"), json: await response.json() as any, upstream, jev };
+}
 
-describe("planTool stays narrow", () => {
-  it("refuses missing, non-object, $ref, composition, and constrained schemas", () => {
-    expect(planTool(closedTool("t", undefined as any).name ? { kind: "function", name: "t" } as any : null as any).closedParams).toBeUndefined();
-    expect(planTool(closedTool("t", { type: "object", properties: { a: { $ref: "#/$defs/a" } } })).closedParams).toBeUndefined();
-    expect(planTool(closedTool("t", { type: "object", allOf: [{ type: "object" }] } as any)).closedParams).toBeUndefined();
-    expect(planTool(closedTool("t", { type: "object", properties: { a: { type: "string", minLength: 2 } } })).closedParams).toBeUndefined();
-    expect(planTool(closedTool("t", { type: "array", items: {} } as any)).closedParams).toBeUndefined();
+describe("closed argument schemas", () => {
+  it.each([
+    { title: "Status", type: "object", properties: { value: { title: "Value", type: "string", enum: ["ok"], examples: ["ok"] } }, required: ["value"] },
+    { properties: { value: { type: ["string", "null"], enum: [null] } }, required: ["value"], additionalProperties: false },
+    { type: "object", properties: { value: { const: 1, type: ["integer", "null"], enum: [1, null] } }, required: ["value"] },
+    { properties: { value: { const: { nested: [1, true] }, type: "object" } }, required: ["value"] },
+  ])("answers directly when closed values satisfy the declared schema: %j", async (schema) => {
+    const result = await route(schema);
+    expect(result.mode).toBe("direct");
+    expect(result.upstream.calls).toHaveLength(0);
+    expect(Object.keys(JSON.parse(result.json.choices[0].message.tool_calls[0].function.arguments))).toEqual(["value"]);
   });
 
-  it("keeps valid no-arg and closed enum/boolean working", () => {
-    expect(
-      planTool(closedTool("empty", { type: "object", properties: {} })).closedParams,
-    ).toEqual([]);
-    expect(
-      planTool(
-        closedTool("lights", {
-          type: "object",
-          properties: { room: { type: "string", enum: ["k", "o"] }, on: { type: "boolean" } },
-          required: ["room", "on"],
-        }),
-      ).closedParams?.map((p) => p.kind),
-    ).toEqual(["enum", "boolean"]);
-  });
-});
-
-describe("validateDirectArgs", () => {
-  it("enforces required, types, const/enum, and additionalProperties", () => {
-    const schema = {
-      type: "object",
-      properties: { room: { type: "string", enum: ["k", "o"] }, on: { type: "boolean" } },
-      required: ["room", "on"],
-      additionalProperties: false,
-    } as any;
-    expect(validateDirectArgs(schema, { room: "k", on: true }).ok).toBe(true);
-    expect(validateDirectArgs(schema, { room: "k" }).ok).toBe(false);
-    expect(validateDirectArgs(schema, { room: "k", on: "true" as any }).ok).toBe(false);
-    expect(validateDirectArgs(schema, { room: "zzz", on: true }).ok).toBe(false);
-    expect(validateDirectArgs(schema, { room: "k", on: true, extra: 1 as any }).ok).toBe(false);
+  it("leaves optional arguments absent without injecting defaults", async () => {
+    const result = await route({ properties: { on: { type: "boolean", default: true } } },
+      { "arg:0:on": { noul: 0.9 }, "stated:0:on": { noul: 0.01 } });
+    expect(result.mode).toBe("direct");
+    expect(JSON.parse(result.json.choices[0].message.tool_calls[0].function.arguments)).toEqual({});
   });
 
-  it("does not coerce, inject defaults, or drop constraints", () => {
-    const schema = {
-      type: "object",
-      properties: { count: { type: "integer", enum: [25, 50] } },
-      required: ["count"],
-    } as any;
-    // "50" must not coerce to 50.
-    expect(validateDirectArgs(schema, { count: "50" as any }).ok).toBe(false);
-    expect(validateDirectArgs(schema, { count: 50 }).ok).toBe(true);
-    // Integer enum against string-typed values: no match either way.
-    const mixed = { type: "object", properties: { a: { type: "integer", enum: ["x"] } }, required: ["a"] } as any;
-    expect(validateDirectArgs(mixed, { a: "x" }).ok).toBe(false);
-    expect(validateDirectArgs(mixed, { a: 1 }).ok).toBe(false);
-    // Missing required must not be filled with defaults.
-    expect(validateDirectArgs(schema, {} as any).ok).toBe(false);
+  it("uses nullable enum answers without coercion", async () => {
+    const result = await route({ properties: { room: { type: ["string", "null"], enum: ["k", null] } }, required: ["room"] },
+      { "arg:0:room": { choice: "null" } });
+    expect(result.mode).toBe("direct");
+    expect(JSON.parse(result.json.choices[0].message.tool_calls[0].function.arguments)).toEqual({ room: null });
   });
 
-  it("refuses adversarial composition and references without network", () => {
-    expect(validateDirectArgs({ type: "object", $ref: "https://example.com/s.json" } as any, {}).ok).toBe(false);
-    expect(validateDirectArgs({ type: "object", anyOf: [{ type: "object" }] } as any, {}).ok).toBe(false);
-    expect(
-      validateDirectArgs({ type: "object", properties: { a: { type: ["string", "null"] } } } as any, { a: "x" }).ok,
-    ).toBe(false);
+  it("treats omitted OpenAI parameters as a no-argument function", async () => {
+    const result = await route(undefined, {}, true);
+    expect(result.mode).toBe("direct");
+    expect(JSON.parse(result.json.choices[0].message.tool_calls[0].function.arguments)).toEqual({});
+    expect(planTool({ kind: "function", name: "status" }).closedParams).toBeUndefined();
   });
 
-  it("rejects unknown keywords and prototype-inherited names", () => {
-    // minProperties is a real constraint the planner would ignore.
-    expect(validateDirectArgs({ type: "object", minProperties: 1 } as any, {}).ok).toBe(false);
-    expect(planTool(closedTool("t", { type: "object", minProperties: 1 } as any)).closedParams).toBeUndefined();
-    // Inherited Object.prototype names must not satisfy required/properties.
-    expect(validateDirectArgs({ type: "object", required: ["toString"] } as any, {}).ok).toBe(false);
-    expect(
-      validateDirectArgs({ type: "object", properties: {}, required: ["toString"] } as any, {
-        toString: "x",
-      } as any).ok,
-    ).toBe(false);
-    // Malformed enum and unknown property type are unsupported, not empty.
-    expect(
-      validateDirectArgs({ type: "object", properties: { a: { enum: "k" } } } as any, { a: "k" }).ok,
-    ).toBe(false);
-    expect(
-      validateDirectArgs({ type: "object", properties: { a: { type: "weird" } } } as any, { a: "k" }).ok,
-    ).toBe(false);
+  it.each([
+    false, null, [], { type: "array" }, { properties: null }, { properties: "bad" }, { required: 5 },
+    { required: ["absent"], properties: {} }, { required: ["toString"], properties: {} },
+    { $ref: "https://example.invalid/schema" }, { allOf: [{}] }, { unknownConstraint: true },
+    { properties: { value: { const: "a", enum: ["b"] } } },
+    { properties: { value: { const: 1, type: "string" } } },
+    { properties: { value: { enum: [] } } }, { properties: { value: { enum: "a" } } },
+    { properties: { value: { enum: ["1", 1] } } }, { properties: { value: { enum: ["x", "x"] } } },
+    { properties: { value: { type: "boolean", not: { const: false } } } },
+    { properties: { value: { enum: ["a"], minLength: 2 } } },
+    { properties: { value: { type: [], const: true } } },
+  ])("delegates malformed or unsupported schemas without losing constraints: %j", async (schema) => {
+    const result = await route(schema);
+    expect(result.mode).toBe("forced");
+    expect(result.upstream.calls).toHaveLength(1);
+    expect(result.upstream.calls[0]!.body.tools[0].function.parameters).toEqual(schema);
   });
 
-  it("refuses malformed optionals, defaults, and bad annotations", () => {
-    // Optional property that is not an object: nothing safe to infer.
-    expect(planTool(closedTool("t", { type: "object", properties: { a: "string" } } as any)).closedParams).toBeUndefined();
-    // `default` would silently invent a value: unsupported for direct.
-    const withDefault = { type: "object", properties: { a: { type: "string", default: "x" } }, required: ["a"] } as any;
-    expect(planTool(closedTool("t", withDefault)).closedParams).toBeUndefined();
-    expect(validateDirectArgs(withDefault, { a: "x" }).ok).toBe(false);
-    // Annotation and dialect keys must be well-formed strings when present.
-    expect(validateDirectArgs({ type: "object", description: 42 } as any, {}).ok).toBe(false);
-    expect(validateDirectArgs({ type: "object", title: null } as any, {}).ok).toBe(false);
-    expect(
-      validateDirectArgs({ type: "object", properties: { a: { type: "boolean", description: {} } } } as any, { a: true }).ok,
-    ).toBe(false);
-    // A string dialect declaration is metadata, not a constraint.
-    expect(validateDirectArgs({ type: "object", $schema: "http://json-schema.org/draft-07/schema#" } as any, {}).ok).toBe(true);
-  });
-
-  it("treats const/type contradictions as mismatches, not coercions", () => {
-    const schema = { type: "object", properties: { a: { type: "string", const: 1 } }, required: ["a"] } as any;
-    expect(validateDirectArgs(schema, { a: 1 }).ok).toBe(false);
-    expect(validateDirectArgs(schema, { a: "1" }).ok).toBe(false);
-    expect(planTool(closedTool("t", schema)).closedParams?.[0]?.kind).toBe("const");
-  });
-});
-
-describe("gateway delegates unsupported schemas instead of direct or reject", () => {
-  it("forces when Jev picks a $ref tool instead of answering direct", async () => {
-    const tool = {
-      type: "function",
-      function: {
-        name: "ref_tool",
-        description: "Has a ref.",
-        parameters: { type: "object", $ref: "#/$defs/a", properties: {} } as any,
-      },
-    };
-    const jev = fakeJev({ tool: { choice: "ref_tool" }, needs_tool: { noul: 0.95 } });
-    const upstream = fakeUpstream();
-    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
-    const res = await app.request("/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "go" }], tools: [tool] }),
-    });
-    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
-    expect(upstream.calls).toHaveLength(1);
-  });
-
-  it("does not treat missing parameters as empty-arg direct", async () => {
-    const tool = { type: "function", function: { name: "no_schema", description: "No params." } };
-    const jev = fakeJev({ tool: { choice: "no_schema" }, needs_tool: { noul: 0.95 } });
-    const upstream = fakeUpstream();
-    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
-    const res = await app.request("/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "go" }], tools: [tool] }),
-    });
-    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+  it("does not read inherited schemas or lose special own-property argument names", async () => {
+    const inherited = Object.create({ type: "object", properties: {} });
+    expect(planTool({ name: "status", kind: "function", parameters: inherited }).closedParams).toBeUndefined();
+    const schema = JSON.parse('{"properties":{"__proto__":{"const":"safe"},"toString":{"const":true}},"required":["__proto__","toString"]}');
+    const result = await route(schema);
+    expect(result.mode).toBe("direct");
+    const args = JSON.parse(result.json.choices[0].message.tool_calls[0].function.arguments);
+    expect(Object.hasOwn(args, "__proto__")).toBe(true);
+    expect(args.__proto__).toBe("safe");
+    expect(args.toString).toBe(true);
   });
 });

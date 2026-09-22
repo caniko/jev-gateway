@@ -76,7 +76,7 @@ describe("jev-opencode spec", () => {
 
   it("injects a stable custom-provider config pointing at the gateway, not at TypeSafe", () => {
     // Shape verified against the pinned binary: 2.0.12 honors `provider`
-    // with `npm`/`options` (see docs/opencode-v2.md). No capabilities or
+    // with `npm`/`options` (see README). No capabilities or
     // limits are declared: nothing invented is presented as detected.
     const config = inlineConfig();
     expect(config.$schema).toBe("https://opencode.ai/config.json");
@@ -125,6 +125,39 @@ describe("jev-opencode spec", () => {
     expect(config.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
   });
 
+  it.each([undefined, ""])("preserves inherited model pairs without filling a missing small model (%s)", (selection) => {
+    if (selection !== undefined) process.env.JEV_OPENCODE_MODEL = selection;
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ model: "native/main" });
+    expect(inlineConfig().model).toBe("native/main");
+    expect(inlineConfig()).not.toHaveProperty("small_model");
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ model: "native/main", small_model: "native/small" });
+    expect(inlineConfig()).toMatchObject({ model: "native/main", small_model: "native/small" });
+  });
+
+  it.each([
+    { provider: "bad" }, { provider: [] }, { provider: { "jev-gateway": [] } },
+    { provider: { "jev-gateway": { options: null } } }, { provider: { "jev-gateway": { models: "bad" } } },
+    { provider: { "jev-gateway": { models: { "gpt-5": [] } } } },
+  ])("rejects non-object provider configuration before merging: %j", (inherited) => {
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(inherited);
+    expect(() => inlineConfig()).toThrow(/OpenCode provider.*must be an object/);
+  });
+
+  it("preserves model metadata, other models, plugins, MCP, and permissions", () => {
+    const inherited = { provider: { other: { options: { custom: true } }, "jev-gateway": {
+      models: { "gpt-5": { name: "Reviewed", capabilities: { vision: true }, limit: { context: 12345 } },
+        another: { name: "Other model" } },
+      options: { timeout: 1234 },
+    } }, plugin: ["other-plugin"], mcp: { server: { command: ["fixture"] } }, permission: { "*": "ask" } };
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(inherited);
+    const merged = inlineConfig();
+    expect(merged.provider["jev-gateway"].models).toEqual(inherited.provider["jev-gateway"].models);
+    expect(merged.provider.other).toEqual(inherited.provider.other);
+    expect(merged.plugin).toEqual(inherited.plugin);
+    expect(merged.mcp).toEqual(inherited.mcp);
+    expect(merged.permission).toEqual(inherited.permission);
+  });
+
   it("preserves provider options, capabilities, and title settings", () => {
     process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
       model: "jev-gateway/gpt-5",
@@ -142,11 +175,12 @@ describe("jev-opencode spec", () => {
     expect(config.permission).toEqual({ edit: "ask" });
   });
 
-  it("does not set obsolete v1 experimental flags; Code Mode stays enabled globally", () => {
+  it("does not override inherited v1 experimental flags", () => {
     const env = opencode.env!(origin);
     expect(env.OPENCODE_EXPERIMENTAL_NATIVE_LLM).toBeUndefined();
     expect(env.OPENCODE_EXPERIMENTAL_CODE_MODE).toBeUndefined();
-    expect(Object.keys(env)).toEqual(["OPENCODE_CONFIG_CONTENT"]);
+    expect(Object.keys(env)).toEqual(["OPENCODE_CONFIG_CONTENT", "JEV_OPENCODE_ROUTING_OWNER"]);
+    expect(env.JEV_OPENCODE_ROUTING_OWNER).toBe("proxy");
   });
 
   it("adds no leading client args, so user flags (including -m) forward untouched", () => {

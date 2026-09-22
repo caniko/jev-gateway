@@ -134,7 +134,7 @@ describe("toChatMessages", () => {
     expect(out.messages?.[1]).toMatchObject({ tool_calls: [{ function: { arguments: '"raw"' } }] });
   });
 
-  it("keeps single-result text beside its result, bypasses ambiguous mixes", () => {
+  it("bypasses unsupported text mixed into tool-result messages", () => {
     const single = toChatMessages({
       messages: [
         { role: "tool", content: [{ type: "text", text: "note" }, { type: "tool-result", id: "c1", name: "t", result: { type: "text", value: "v" } }] },
@@ -230,7 +230,10 @@ describe("applyJevHint conversation", () => {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ mode: "forced", tool: "read", confidence: 0.9 }) });
     });
     const system: Array<{ type: string; text?: string }> = [{ type: "text", text: "Sys." }];
-    const out = await applyJevHint(eventWith(system), config, fetch);
+    const event = eventWith(system);
+    const persisted = event.messages;
+    const before = structuredClone(event.messages);
+    const out = await applyJevHint(event, config, fetch);
     expect(out).toEqual({ applied: true, reason: "forced", tool: "read" });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(sent.model).toBe("p/m");
@@ -241,8 +244,14 @@ describe("applyJevHint conversation", () => {
       ["tool", "v"],
       ["user", "again"],
     ]);
-    expect(system).toHaveLength(2);
-    expect(system[1]!.text).toContain("[jev-routing]");
+    expect(system).toEqual([{ type: "text", text: "Sys." }]);
+    expect(persisted).toEqual(before);
+    expect(JSON.stringify(event.messages)).toContain("[jev-routing]");
+    await applyJevHint(event, config, fetch);
+    expect(JSON.stringify(event.messages).match(/\[jev-routing\]/g)).toHaveLength(1);
+    await applyJevHint(event, config, decideWith({}, 401));
+    expect(JSON.stringify(event.messages)).not.toContain("[jev-routing]");
+    expect(persisted).toEqual(before);
   });
 
   it("skips multimodal without calling, and leaves malformed models alone", async () => {
@@ -304,9 +313,9 @@ describe("plugin definition", () => {
       return { dispose: vi.fn() };
     });
     await plugin.setup({ options: {}, session: { hook } } as never);
-    expect(hook).toHaveBeenCalledTimes(1);
+    expect(hook).toHaveBeenCalledTimes(2);
     expect(hook).toHaveBeenCalledWith("context", expect.any(Function));
-    expect(hooks).toHaveLength(1);
+    expect(hooks.map((entry) => entry.name)).toEqual(["http.request", "context"]);
 
     const hook2 = vi.fn();
     await plugin.setup({ options: { enabled: false }, session: { hook: hook2 } } as never);

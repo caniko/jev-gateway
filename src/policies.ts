@@ -1,117 +1,66 @@
-// Per-tool routing policies: passthrough | selection-only | direct-eligible.
-// Global JEV_DIRECT_CALLS=false always wins. Policies never remove tools
-// from the upstream request and never infer trust from names or MCP
-// descriptions. OpenCode approvals stay authoritative.
-
 export type ToolPolicy = "passthrough" | "selection-only" | "direct-eligible";
-
-export interface PolicyRule {
+interface PolicyRule {
   match: string;
+  tokens: string[];
+  exact: boolean;
+  specificity: number;
   policy: ToolPolicy;
 }
-
-export interface PolicyConfig {
-  /** Default for unknown tools. Absent config defaults to direct-eligible (existing behavior). */
-  default: ToolPolicy;
-  rules: PolicyRule[];
-}
-
-export const normalizeToolName = (name: string): string => name.trim().toLowerCase();
-
-const POLICY_ORDER: Record<ToolPolicy, number> = {
-  passthrough: 0,
-  "selection-only": 1,
-  "direct-eligible": 2,
-};
-
-/** Most restrictive wins on ties: passthrough > selection-only > direct-eligible. */
-function moreRestrictive(a: ToolPolicy, b: ToolPolicy): ToolPolicy {
-  return POLICY_ORDER[a] <= POLICY_ORDER[b] ? a : b;
-}
-
-function isValidPattern(pattern: string): boolean {
-  if (!pattern || pattern.length > 128) return false;
-  // Documented simple patterns: exact names plus `*`/`?` wildcards
-  // (whole-value, matched case-insensitively after normalization).
-  if (!/^[\p{L}\p{N}_.:/\-*?]+$/u.test(pattern)) return false;
-  return true;
-}
-
-function patternToRegExp(pattern: string): RegExp {
-  const esc = pattern
-    .toLowerCase()
-    .split("")
-    .map((ch) => {
-      if (ch === "*") return ".*";
-      if (ch === "?") return ".";
-      return /[.*+?^${}()|[\]\\]/.test(ch) ? `\\${ch}` : ch;
-    })
-    .join("");
-  return new RegExp(`^${esc}$`);
-}
-
-const hasOwn = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
+export interface PolicyConfig { default: ToolPolicy; rules: PolicyRule[] }
+export const normalizeToolName = (name: string): string => name.toLowerCase();
+const ORDER: Record<ToolPolicy, number> = { passthrough: 0, "selection-only": 1, "direct-eligible": 2 };
+const isPolicy = (value: unknown): value is ToolPolicy => typeof value === "string" && Object.hasOwn(ORDER, value);
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 export function parsePolicyConfig(raw: unknown): PolicyConfig {
-  // Unset and empty mean "no policy configured" (existing permissive
-  // default). An explicit null is a malformed value and throws instead of
-  // silently becoming permissive.
   if (raw === undefined || raw === "") return { default: "direct-eligible", rules: [] };
-  if (raw === null) throw new Error("tool policies must be an object, got null");
-  const obj: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
-  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) throw new Error("tool policies must be an object");
-  // Unknown fields are rejected: a typo like {defualt: ...} must throw,
-  // never silently fall back to the permissive default.
-  for (const k of Object.keys(obj)) {
-    if (k !== "default" && k !== "rules" && k !== "$comment")
-      throw new Error(`unknown tool policy field: ${k}`);
-  }
-  const def = hasOwn(obj, "default") ? (obj as any).default : "direct-eligible";
-  if (def !== "passthrough" && def !== "selection-only" && def !== "direct-eligible")
-    throw new Error(`invalid default policy: ${def}`);
-  const rulesRaw = hasOwn(obj, "rules") ? (obj as any).rules : [];
-  if (!Array.isArray(rulesRaw)) throw new Error("tool policy rules must be an array");
-  const rules: PolicyRule[] = rulesRaw.map((r: any, i: number) => {
-    if (typeof r !== "object" || r === null || Array.isArray(r)) throw new Error(`policy rule ${i} must be an object`);
-    for (const k of Object.keys(r)) {
-      if (k !== "match" && k !== "policy") throw new Error(`unknown policy rule field: ${k}`);
-    }
-    if (typeof r.match !== "string" || !isValidPattern(r.match)) throw new Error(`invalid policy match: ${r.match}`);
-    if (r.policy !== "passthrough" && r.policy !== "selection-only" && r.policy !== "direct-eligible")
-      throw new Error(`invalid policy: ${r.policy}`);
-    return { match: r.match, policy: r.policy as ToolPolicy };
-  });
-  return { default: def as ToolPolicy, rules };
+  const fail = (detail: string): never => { throw new Error(`JEV_TOOL_POLICIES ${detail}, got ${JSON.stringify(raw)}`); };
+  let value: unknown;
+  try { value = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return fail("must be a JSON object"); }
+  if (!isRecord(value) || Object.keys(value).some((key) => !["default", "rules", "$comment"].includes(key))) return fail("must contain only default, rules, and $comment");
+  const defaultPolicy = Object.hasOwn(value, "default") ? value.default : "direct-eligible";
+  if (!isPolicy(defaultPolicy)) return fail("has an invalid default policy");
+  const rules = Object.hasOwn(value, "rules") ? value.rules : [];
+  if (!Array.isArray(rules) || rules.length > 128) return fail("must contain at most 128 rules");
+  return { default: defaultPolicy, rules: rules.map((rule: unknown) => {
+    if (!isRecord(rule) || Object.keys(rule).some((key) => !["match", "policy"].includes(key))) return fail("has an invalid rule");
+    if (typeof rule.match !== "string" || rule.match.length > 128 || !/^[\p{L}\p{N}_.:/\-*?]+$/u.test(rule.match)) return fail("has an invalid match pattern");
+    if (!isPolicy(rule.policy)) return fail("has an invalid rule policy");
+    const match = normalizeToolName(rule.match);
+    const tokens = Array.from(match);
+    return { match, tokens, exact: !tokens.includes("*") && !tokens.includes("?"),
+      specificity: rule.match.replace(/[*?]/g, "").length, policy: rule.policy };
+  }) };
 }
 
-/**
- * Resolve policy for a tool name.
- * Precedence: exact normalized match > pattern (longer pattern wins) >
- * default. Same-specificity conflicts resolve to the most restrictive.
- * When `roster` is given and two distinct roster names share a normalized
- * form with the selected tool, the identity is ambiguous and resolves to
- * passthrough regardless of rules.
- */
-export function policyFor(toolName: string, config: PolicyConfig, roster: string[] = []): ToolPolicy {
-  const norm = normalizeToolName(toolName);
-  if (roster.some((other) => other !== toolName && normalizeToolName(other) === norm)) return "passthrough";
-  // Exact normalized matches first.
-  const exact = config.rules.filter((r) => !r.match.includes("*") && !r.match.includes("?") && normalizeToolName(r.match) === norm);
-  if (exact.length) {
-    return exact.reduce((a, b) => moreRestrictive(a, b.policy), exact[0]!.policy);
+/** Dynamic programming avoids regex backtracking: O(pattern × name) time, O(pattern) space. */
+function matches(tokens: string[], name: string): boolean {
+  let previous = new Array<boolean>(tokens.length + 1).fill(false);
+  previous[0] = true;
+  for (let j = 1; j <= tokens.length; j++) previous[j] = tokens[j - 1] === "*" && previous[j - 1]!;
+  for (const char of name) {
+    const next = new Array<boolean>(tokens.length + 1).fill(false);
+    for (let j = 1; j <= tokens.length; j++) {
+      const token = tokens[j - 1];
+      next[j] = token === "*" ? next[j - 1]! || previous[j]! : (token === "?" || token === char) && previous[j - 1]!;
+    }
+    previous = next;
   }
-  let best: { rule: PolicyRule; len: number } | undefined;
-  let bestPolicy: ToolPolicy | undefined;
+  return previous[tokens.length]!;
+}
+
+export function policyFor(name: string, config: PolicyConfig, roster: string[] = []): ToolPolicy {
+  const normalized = normalizeToolName(name);
+  if (roster.some((other) => other !== name && normalizeToolName(other) === normalized)) return "passthrough";
+  let best = -1;
+  let policy = config.default;
   for (const rule of config.rules) {
-    if (!rule.match.includes("*") && !rule.match.includes("?")) continue;
-    if (!patternToRegExp(rule.match).test(norm)) continue;
-    const len = rule.match.replace(/[*?]/g, "").length;
-    if (!best || len > best.len) {
-      best = { rule, len };
-      bestPolicy = rule.policy;
-    } else if (len === best.len && bestPolicy) {
-      bestPolicy = moreRestrictive(bestPolicy, rule.policy);
+    if (!(rule.exact ? rule.match === normalized : matches(rule.tokens, normalized))) continue;
+    const rank = rule.exact ? 129 : rule.specificity;
+    if (rank > best || (rank === best && ORDER[rule.policy] < ORDER[policy])) {
+      best = rank;
+      policy = rule.policy;
     }
   }
-  return bestPolicy ?? config.default;
+  return policy;
 }

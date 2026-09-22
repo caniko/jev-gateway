@@ -6,7 +6,7 @@ import { fakeJev, fakeUpstream, testConfig } from "./helpers.js";
 // sha512-LwB0LD7LXZbfFDU12KwiUq5nPcjW1BzYpp81UPzEBpeZSNvszKXnTUa3l8JmLi6I6/WtQx/Z/8n2743FyY6lpg==).
 // Gateway transport safety for the wire shapes 2.0.12 was observed to use
 // (Responses for built-in providers, Chat Completions for openai-compatible
-// custom providers; see docs/opencode-v2.md). No paid keys or desktop needed.
+// custom providers). No paid keys or desktop needed.
 
 describe("opencode v2 wire safety", () => {
   it("preserves provider fields on forced path and audits ARGS_MODEL", async () => {
@@ -37,7 +37,6 @@ describe("opencode v2 wire safety", () => {
     // ARGS_MODEL is used verbatim when set; otherwise the request model is preserved.
     expect(upstream.calls[0]!.body.model).toBe("cheap-model");
 
-    const app2 = createApp({ config: testConfig(), askJev: fakeJev({ tool: { choice: "bash" }, needs_tool: { noul: 0.9 } }).askJev, fetch: fakeUpstream().fetchImpl });
     const upstream2 = fakeUpstream();
     const app3 = createApp({ config: testConfig(), askJev: fakeJev({ tool: { choice: "bash" }, needs_tool: { noul: 0.9 } }).askJev, fetch: upstream2.fetchImpl });
     const res3 = await app3.request("/v1/chat/completions", {
@@ -47,7 +46,6 @@ describe("opencode v2 wire safety", () => {
     });
     expect(res3.headers.get("x-jev-gateway-mode")).toBe("forced");
     expect(upstream2.calls[0]!.body.model).toBe("gpt-5");
-    expect(app2).toBeDefined();
   });
 
   it("disables direct on server-side history, namespaces, and dynamic tools", async () => {

@@ -1,5 +1,4 @@
-import { Plugin } from "@opencode/plugin";
-import type { SessionContext } from "@opencode/plugin/promise/session";
+import type { Plugin } from "@opencode/plugin";
 // NOTE: @opencode/ai is a type-only import (erased at runtime, so the packed
 // plugin never needs it installed). It pins the exact 2.0.12 hook payload
 // shapes this adapter was verified against.
@@ -10,7 +9,7 @@ import type { Message, SystemPart } from "@opencode/ai";
 // What this does: on each primary agent-loop model request, it maps the
 // visible v2 session context to the gateway's routing representation,
 // asks /router/decide which tool Jev would select, and appends that
-// selection as a routing *hint* to the system prompt. The main model still
+// selection as a request-local hint. The main model still
 // decides, executes, and owns approvals; nothing is forced, nothing is
 // executed here.
 //
@@ -33,6 +32,8 @@ export interface JevPluginOptions {
   timeoutMs?: number;
   /** Set to false to load the plugin without registering the hook. */
   enabled?: boolean;
+  /** Optional gateway credential, sent only to its decision endpoint. */
+  gatewayApiKey?: string;
 }
 
 export interface HintOutcome {
@@ -44,6 +45,7 @@ export interface HintOutcome {
 export interface ResolvedConfig {
   gatewayUrl: string;
   timeoutMs: number;
+  gatewayApiKey?: string;
 }
 
 type FetchImpl = typeof fetch;
@@ -66,7 +68,7 @@ export function resolveOptions(raw: unknown): ResolvedConfig {
   const options = raw === undefined ? {} : raw;
   if (!isRecord(options)) throw new Error("jev-gateway: options must be an object");
   for (const key of Object.keys(options)) {
-    if (key !== "gatewayUrl" && key !== "timeoutMs" && key !== "enabled") {
+    if (key !== "gatewayUrl" && key !== "timeoutMs" && key !== "enabled" && key !== "gatewayApiKey") {
       throw new Error(`jev-gateway: unknown option "${key}"`);
     }
   }
@@ -96,7 +98,9 @@ export function resolveOptions(raw: unknown): ResolvedConfig {
   if (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) {
     throw new Error(`jev-gateway: timeoutMs must be an integer 1..120000, got "${String(timeoutMs)}"`);
   }
-  return { gatewayUrl, timeoutMs };
+  if (options.gatewayApiKey !== undefined && (typeof options.gatewayApiKey !== "string" || !options.gatewayApiKey
+    || /[\r\n]/.test(options.gatewayApiKey))) throw new Error("jev-gateway: gatewayApiKey must be a nonempty single-line string");
+  return { gatewayUrl, timeoutMs, ...(typeof options.gatewayApiKey === "string" ? { gatewayApiKey: options.gatewayApiKey } : {}) };
 }
 
 export interface ChatMessage {
@@ -201,9 +205,6 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
     }
     const texts: string[] = [];
     const calls: NonNullable<ChatMessage["tool_calls"]> = [];
-    // Result turns emitted for the current message, so trailing message
-    // text can join them instead of becoming a mislabeled turn.
-    const resultTurns: ChatMessage[] = [];
     const flushAssistant = () => {
       if (texts.join("").trim() !== "" || calls.length > 0) {
         out.push({
@@ -245,36 +246,13 @@ export function toChatMessages(event: { system?: unknown; messages?: unknown }):
         if (typeof part.id !== "string") return { opaque: true };
         const classified = toolResultText((part as { result?: unknown }).result);
         if (!("text" in classified)) return { opaque: true };
-        // Result parts always carry their call ID, whatever message role
-        // they arrived in, so association survives without silent drops.
-        // Pending text is NOT flushed as a separate turn here: for tool
-        // messages it joins the result turns at message end.
-        if (role !== "tool") flushAssistant();
         const turn: ChatMessage = { role: "tool", tool_call_id: part.id, content: classified.text };
         out.push(turn);
-        resultTurns.push(turn);
         continue;
       }
       return { opaque: true };
     }
-    if (role === "tool") {
-      // Message-level text is attributable only when the message carries
-      // exactly one result; with several results the text could belong to
-      // any of them, so bypass rather than guess. With no results the text
-      // stands alone; the gateway then attributes it as unknown, which the
-      // test pins as the documented fallback.
-      if (texts.join("").trim() !== "") {
-        if (resultTurns.length === 1) {
-          const last = resultTurns[resultTurns.length - 1] as { content?: string };
-          last.content = `${last.content ?? ""}\n${texts.join("\n")}`;
-        } else if (resultTurns.length === 0) {
-          out.push({ role, content: texts.join("\n") });
-        } else {
-          return { opaque: true };
-        }
-      }
-      continue;
-    }
+    if (role === "tool") continue;
     flushAssistant();
   }
   return out.length > 0 ? { messages: out } : {};
@@ -296,7 +274,7 @@ export function parseDecision(
   if (mode !== "forced" && mode !== "hint" && mode !== "direct") {
     return { error: `decision_${String(mode ?? "unknown")}` };
   }
-  if (typeof tool !== "string" || tool === "" || !roster.includes(tool)) {
+  if (typeof tool !== "string" || !/^[\p{L}\p{N}_.:/-]{1,128}$/u.test(tool) || !roster.includes(tool)) {
     return { error: "decision_unknown_tool" };
   }
   if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
@@ -320,11 +298,23 @@ export interface HintEvent {
   model?: unknown;
 }
 
+const ownedHints = new WeakSet<object>();
+
+function cleanHints(messages: unknown[]): unknown[] {
+  return messages.map((message) => {
+    if (!isRecord(message) || !Array.isArray(message.content)) return message;
+    const content = message.content.filter((part: unknown) => !isRecord(part) || !ownedHints.has(part));
+    return content.length === message.content.length ? message : { ...message, content };
+  });
+}
+
 export async function applyJevHint(
   event: HintEvent,
   config: ResolvedConfig,
   fetchImpl: FetchImpl = fetch,
 ): Promise<HintOutcome> {
+  if (Array.isArray(event.messages)) event.messages = cleanHints(event.messages);
+  if (isRecord(event.model) && event.model.providerID === "jev-gateway") return { applied: false, reason: "proxy_owner" };
   const tools = event.tools ?? {};
   const names = Object.keys(tools);
   if (names.length === 0) return { applied: false, reason: "no_tools" };
@@ -337,7 +327,8 @@ export async function applyJevHint(
   try {
     const response = await fetchImpl(`${config.gatewayUrl.replace(/\/+$/, "")}/router/decide`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(config.gatewayApiKey ? { authorization: `Bearer ${config.gatewayApiKey}` } : {}) },
+      redirect: "error",
       body: JSON.stringify({
         model,
         messages,
@@ -359,21 +350,39 @@ export async function applyJevHint(
   }
   const parsed = parseDecision(decision, names);
   if (!("tool" in parsed)) return { applied: false, reason: parsed.error };
-  // The hint needs an array to land in; anything else leaves the request
-  // unchanged rather than pretending it was annotated.
-  if (!Array.isArray(event.system)) return { applied: false, reason: "no_system_target" };
-  event.system.push({
+  if (!Array.isArray(event.messages)) return { applied: false, reason: "no_message_target" };
+  let index = event.messages.length - 1;
+  while (index >= 0 && !(isRecord(event.messages[index]) && event.messages[index].role === "user")) index--;
+  const target: unknown = event.messages[index];
+  if (!isRecord(target)) return { applied: false, reason: "no_message_target" };
+  const hint = {
     type: "text",
     text: `[jev-routing] Jev suggests tool "${parsed.tool}" (confidence ${parsed.confidence.toFixed(2)}) for this request.`,
-  });
+  };
+  ownedHints.add(hint);
+  const content = typeof target.content === "string" ? [{ type: "text", text: target.content }]
+    : Array.isArray(target.content) ? target.content : [];
+  event.messages = event.messages.map((message: unknown, position: number) => position === index
+    ? { ...target, content: [...content, hint] } : message);
   return { applied: true, reason: parsed.mode, tool: parsed.tool };
 }
 
-export default Plugin.define({
+export default {
   id: "jev-gateway",
   async setup(ctx) {
     const config = resolveOptions(ctx.options);
     if ((ctx.options as JevPluginOptions | undefined)?.enabled === false) return;
+    if (process.env.JEV_OPENCODE_ROUTING_OWNER === "proxy") {
+      throw new Error("jev-gateway: the launcher owns proxy routing; disable the advisory plugin or use a native provider without the launcher");
+    }
+    await ctx.session.hook("http.request", async (event) => {
+      // An aliased provider can still point at this proxy: it must not decide a second time.
+      if (new URL(event.request.url).origin === new URL(config.gatewayUrl).origin) {
+        const headers = new Headers(event.request.headers);
+        headers.set("x-jev-gateway", "off");
+        event.request = new Request(event.request, { headers });
+      }
+    });
     // `context` covers the agent loop (including continuations) but not
     // title/compaction/generate, which have their own hooks.
     await ctx.session.hook("context", async (event) => {
@@ -384,4 +393,4 @@ export default Plugin.define({
       }
     });
   },
-});
+} satisfies Plugin.Plugin;

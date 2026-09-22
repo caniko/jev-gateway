@@ -39,7 +39,6 @@
   "files": [
     "dist",
     "bin",
-    "plugin",
     "scripts/mock-jev.mjs",
     ".env.example",
     "CHANGELOG.md"
@@ -47,7 +46,7 @@
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "start": "node --env-file-if-exists=.env dist/index.js",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp src/dashboard.html dist/",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && tsc -p tsconfig.plugin.json && cp src/dashboard.html dist/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "codex": "node bin/jev-codex.mjs",
@@ -58,10 +57,10 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
-    "@opencode/plugin": "2.0.12",
     "hono": "^4.13.8"
   },
   "devDependencies": {
+    "@opencode/plugin": "2.0.12",
     "@opencode/ai": "2.0.12",
     "@types/node": "^22.20.3",
     "@typesafe-ai/sdk": "^0.6.0",
@@ -69,5 +68,6 @@
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"
   },
+  "exports": { "./plugin": "./dist/plugin/jev/index.js" },
   "packageManager": "pnpm@10.33.3"
 }

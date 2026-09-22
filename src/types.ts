@@ -92,15 +92,7 @@ export interface RouterInput {
    * the conversation instead, for requests where rewriting tool_choice is rejected or too costly.
    */
   steer?: "tool_choice" | "hint";
-  /**
-   * False when a synthetic direct answer would be unsafe on this transport
-   * even though selection is fine: Responses sessions are stored by default
-   * (explicitly or by omission), where the gateway's unstored direct reply
-   * (store:false, previous_response_id:null) must not masquerade as a
-   * stored upstream response a later request could chain from. Only an
-   * explicit `store: false` keeps direct mode. Forced/hint delegation
-   * still applies.
-   */
+  /** False for transports whose stored response IDs cannot be synthesized locally. */
   allowDirect?: boolean;
 }
 

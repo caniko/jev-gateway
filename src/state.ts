@@ -7,10 +7,17 @@ export type Limits = Pick<Config, "maxStateChars" | "maxMessageChars">;
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   const marker = " …[truncated]… ";
-  if (max < marker.length) return marker.slice(0, Math.max(0, max));
+  if (max < marker.length) return prefix(text, max);
   const keep = Math.max(0, max - marker.length);
   const head = Math.ceil(keep * 0.6);
-  return text.slice(0, head) + marker + text.slice(text.length - (keep - head));
+  const tailStart = text.length - (keep - head);
+  const tail = text.slice(tailStart);
+  return prefix(text, head) + marker + (/^[\uDC00-\uDFFF]/u.test(tail) ? tail.slice(1) : tail);
+}
+
+function prefix(text: string, max: number): string {
+  const result = text.slice(0, Math.max(0, max));
+  return /[\uD800-\uDBFF]$/u.test(result) ? result.slice(0, -1) : result;
 }
 
 /** Jev is text-only: flatten content parts and leave a placeholder for anything else. */
@@ -25,208 +32,91 @@ export function textOf(content: unknown): string {
     .join("\n");
 }
 
-export function validateLimits(limits: Limits): void {
-  for (const key of ["maxStateChars", "maxMessageChars"] as const) {
-    const value = limits[key];
-    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
-      throw new Error(`${key} must be a positive integer, got "${String(value)}"`);
-  }
-  if (limits.maxStateChars < 64) throw new Error("maxStateChars must be at least 64 to encode a bypass state");
+function record(value: Json | undefined): value is Turn {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isToolResult(turn: Turn): boolean {
-  return (turn as any).role === "tool_result";
-}
-
-function isAssistantCalls(turn: Turn): boolean {
-  return Array.isArray((turn as any).tool_calls);
-}
-
-const TRUNCATED_MARKER = "[truncated]";
-
-function callsOf(turn: Turn): Array<{ tool?: unknown; arguments?: unknown; call_id?: unknown }> {
-  return isAssistantCalls(turn) ? ((turn as any).tool_calls as Array<Record<string, unknown>>) : [];
-}
-
-/** Truncation markers inside tool calls/results mean chopped structured evidence. */
-function hasTruncatedStructured(turns: Turn[]): boolean {
-  return turns.some((t) => {
-    if (isToolResult(t) && typeof (t as any).content === "string" && (t as any).content.includes(TRUNCATED_MARKER))
-      return true;
-    return callsOf(t).some(
-      (c) => typeof c.arguments === "string" && (c.arguments as string).includes(TRUNCATED_MARKER),
-    );
+/** Merge dependency spans, so call A, call B, result A, result B remain one ordered group. */
+function interactionGroups(turns: Turn[]): { start: number; end: number; ambiguous: boolean }[] {
+  const ends = turns.map((_turn, index) => index);
+  const invalid = new Set<number>();
+  const calls: { index: number; id: Json | undefined; name: Json | undefined; done: boolean }[] = [];
+  const byId = new Map<string, typeof calls>();
+  turns.forEach((turn, index) => {
+    for (const call of Array.isArray(turn.tool_calls) ? turn.tool_calls : []) {
+      if (!record(call)) { invalid.add(index); continue; }
+      const entry = { index, id: call.call_id, name: call.tool, done: false };
+      calls.push(entry);
+      if (typeof entry.id === "string") {
+        const prior = byId.get(entry.id) ?? [];
+        if (prior.length) { invalid.add(index); prior.forEach((item) => invalid.add(item.index)); }
+        prior.push(entry);
+        byId.set(entry.id, prior);
+      }
+    }
+    if (turn.role !== "tool_result") return;
+    const candidates = typeof turn.call_id === "string" ? byId.get(turn.call_id) ?? []
+      : calls.filter((call) => call.id === undefined && !call.done && call.name === turn.tool);
+    const call = candidates[0];
+    if (candidates.length !== 1 || !call || call.done) { invalid.add(index); return; }
+    call.done = true;
+    ends[call.index] = Math.max(ends[call.index]!, index);
   });
+  const groups = [];
+  for (let start = 0; start < turns.length;) {
+    let end = ends[start]!;
+    let ambiguous = false;
+    for (let index = start; index <= end; index++) {
+      end = Math.max(end, ends[index]!);
+      ambiguous ||= invalid.has(index);
+    }
+    groups.push({ start, end, ambiguous });
+    start = end + 1;
+  }
+  return groups;
 }
 
-/**
- * Jev state: the content the questions are asked about.
- *
- * - Keeps a contiguous suffix of complete interaction groups: each
- *   assistant tool_calls turn plus its following tool_result turns is
- *   atomic, so a kept result always keeps its call. Once a group stops
- *   fitting, everything older is omitted (never a hole in the middle).
- * - The total serialized state, including envelope keys and omission
- *   metadata, stays within maxStateChars. An oversized newest group is
- *   deep-cloned and truncated to fit, marked explicit.
- * - Never infers identifiers and never promotes tool text to system
- *   instructions. Only Jev input is shaped here; the upstream request is
- *   untouched.
- */
+/** Keep a contiguous suffix of complete groups, with explicit clipping metadata. */
 export function buildState(input: Pick<RouterInput, "system" | "turns">, limits: Limits): { [key: string]: Json } {
-  validateLimits(limits);
-  // Fixed envelope reservation: keys plus worst-case omission metadata and
-  // flags, so caps computed against it hold for the serialized total.
-  const ENVELOPE_FIXED = JSON.stringify({
-    assistant_instructions: "",
-    earlier_turns_omitted: 10000000000,
-    truncated_routing_context: true,
-    conversation: [],
-  }).length;
-  let systemText = truncate(input.system, limits.maxMessageChars);
-  // The system prompt itself is bounded: when it alone exceeds the budget
-  // it is clipped to fit and marked, never allowed to silently squeeze out
-  // bounded turns or blow the total.
-  let systemTruncated = false;
-  const maxSystem = Math.max(0, limits.maxStateChars - ENVELOPE_FIXED);
-  if (systemText.length > maxSystem) {
-    systemText = truncate(systemText, maxSystem);
-    systemTruncated = true;
-  }
-  const overhead = JSON.stringify({ conversation: [] }).length + 32;
-  let budget = limits.maxStateChars - systemText.length - overhead;
-
-  type Group = { turns: Turn[]; size: number };
-  const groups: Group[] = [];
-  {
-    let cur: Turn[] = [];
-    const flush = () => {
-      if (cur.length) {
-        groups.push({ turns: cur, size: cur.reduce((s, t) => s + JSON.stringify(t).length, 0) });
-        cur = [];
-      }
+  const groups = interactionGroups(input.turns);
+  const unusable = { conversation: [], unrepresentable: true };
+  const render = (start: number, cap: number): { [key: string]: Json } => {
+    let clipped = false;
+    const clip = (text: string): string => {
+      const result = truncate(text, cap);
+      clipped ||= result !== text;
+      return result;
     };
-    for (const turn of input.turns) {
-      if (isAssistantCalls(turn)) {
-        flush();
-        cur.push(turn);
-      } else if (isToolResult(turn) && cur.length && isAssistantCalls(cur[0]!)) {
-        cur.push(turn);
-      } else {
-        flush();
-        cur.push(turn);
-        flush();
+    const system = clip(input.system);
+    const conversation = structuredClone(input.turns.slice(start));
+    for (const turn of conversation) {
+      for (const key of ["text", "content"]) if (typeof turn[key] === "string") turn[key] = clip(turn[key]);
+      for (const call of Array.isArray(turn.tool_calls) ? turn.tool_calls : []) {
+        if (record(call) && typeof call.arguments === "string") call.arguments = clip(call.arguments);
       }
     }
-    flush();
-  }
-
-  // Newest-first selection; the first group that stops fitting ends
-  // selection so the kept suffix stays contiguous.
-  const kept: Group[] = [];
-  let truncatedNewest = false;
-  for (let gi = groups.length - 1; gi >= 0; gi--) {
-    const g = groups[gi]!;
-    if (g.size <= budget) {
-      kept.unshift(g);
-      budget -= g.size;
-      continue;
-    }
-    if (kept.length > 0) break;
-    // Only the newest group may be fitted, and it stays whole: deep-clone
-    // (never mutate the caller's turns) and shrink its text fields
-    // proportionally so call/result association survives. The target is the
-    // exact envelope, so the serialized total fits the budget. Marked
-    // explicit. (Degenerate budgets below the minimal envelope+markers are
-    // the only exception; integer validation rejects non-positive limits.)
-    const clones = g.turns.map((t) => structuredClone(t) as Turn);
-    const fields: Array<{ o: Record<string, unknown>; k: string }> = [];
-    for (const t of clones) {
-      for (const k of ["text", "content"] as const) {
-        if (typeof (t as any)[k] === "string") fields.push({ o: t as unknown as Record<string, unknown>, k });
-      }
-      for (const c of callsOf(t)) {
-        if (typeof c.arguments === "string") fields.push({ o: c as unknown as Record<string, unknown>, k: "arguments" });
-      }
-    }
-    const fieldLen = fields.reduce((s, f) => s + ((f.o[f.k] as string) || "").length, 0);
-    const fixed = JSON.stringify(clones).length - fieldLen;
-    const omittedAfter = input.turns.length - g.turns.length;
-    const envelope = JSON.stringify({
-      ...(systemText ? { assistant_instructions: systemText } : {}),
-      ...(omittedAfter ? { earlier_turns_omitted: omittedAfter } : {}),
-      truncated_routing_context: true,
-      conversation: [],
-    }).length;
-    const available = limits.maxStateChars - envelope - fixed;
-    // When not even scaffolding plus truncation markers fit, keep no turns:
-    // an explicitly flagged empty suffix still fits and bypasses safely.
-    if (available < fields.length * 18) {
-      truncatedNewest = true;
-      kept.unshift({ turns: [], size: 0 });
-      break;
-    }
-    if (available < fieldLen) {
-      for (const f of fields) {
-        const v = f.o[f.k] as string;
-        f.o[f.k] = truncate(v, Math.max(0, Math.floor((v.length * Math.max(0, available)) / Math.max(1, fieldLen))));
-      }
-      truncatedNewest = true;
-    }
-    kept.unshift({ turns: clones, size: 0 });
-    break;
-  }
-
-  // Final enforcement: the serialized state, envelope included, fits the
-  // budget by dropping oldest whole groups (association-safe). A single
-  // remaining turn is minimal by construction.
-  while (kept.length > 1) {
-    const probe: { [key: string]: Json } = {
-      ...(systemText ? { assistant_instructions: systemText } : {}),
-      earlier_turns_omitted: input.turns.length - kept.flatMap((g) => g.turns).length,
-      ...(truncatedNewest ? { truncated_routing_context: true } : {}),
-      conversation: kept.flatMap((g) => g.turns),
-    };
-    if (JSON.stringify(probe).length <= limits.maxStateChars) break;
-    kept.shift();
-  }
-
-  const conversation = kept.flatMap((g) => g.turns);
-  const omitted = input.turns.length - conversation.length;
-  const result: { [key: string]: Json } = {
-    ...(systemText ? { assistant_instructions: systemText } : {}),
-    ...(omitted ? { earlier_turns_omitted: omitted } : {}),
-    ...(truncatedNewest || systemTruncated || hasTruncatedStructured(conversation)
-      ? { truncated_routing_context: true }
-      : {}),
-    conversation,
+    return { ...(system ? { assistant_instructions: system } : {}),
+      ...(start ? { earlier_turns_omitted: start } : {}), ...(clipped ? { clipped: true } : {}), conversation };
   };
-  // JSON escaping and immutable identifiers can exceed any raw character
-  // estimate. Never send an oversized or partially identifiable state.
-  // This constant envelope fits every accepted budget and forces bypass.
-  if (JSON.stringify(result).length > limits.maxStateChars) {
-    return { conversation: [], truncated_routing_context: true };
+  let kept: { [key: string]: Json } | undefined;
+  // ponytail: exact suffix serialization is quadratic in retained turns; cache group sizes if profiling warrants it.
+  for (let index = groups.length - 1; index >= 0; index--) {
+    const group = groups[index]!;
+    if (group.ambiguous) return kept ?? unusable;
+    const candidate = render(group.start, limits.maxMessageChars);
+    if (JSON.stringify(candidate).length <= limits.maxStateChars) { kept = candidate; continue; }
+    if (kept) break;
+    let low = 0;
+    let high = limits.maxMessageChars;
+    let smallest = render(group.start, 0);
+    if (JSON.stringify(smallest).length > limits.maxStateChars) return unusable;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const probe = render(group.start, middle);
+      if (JSON.stringify(probe).length <= limits.maxStateChars) { smallest = probe; low = middle + 1; }
+      else high = middle - 1;
+    }
+    return smallest;
   }
-  return result;
-}
-
-/** Call/result association check over kept turns, by preserved call IDs. */
-export function danglingResult(conversation: Turn[]): boolean {
-  const ids = new Set<string>();
-  for (const t of conversation) {
-    for (const c of callsOf(t)) if (typeof c.call_id === "string") ids.add(c.call_id);
-  }
-  return conversation.some((t) => isToolResult(t) && typeof (t as any).call_id === "string" && !ids.has((t as any).call_id));
-}
-
-/**
- * When routing-relevant structured results cannot be preserved safely,
- * bypass rather than presenting chopped JSON/IDs or disconnected results
- * as complete evidence. Ordinary text omission still routes.
- */
-export function incompleteRoutingContext(state: { [key: string]: Json }): string | undefined {
-  if (state.truncated_routing_context) return "incomplete_routing_context";
-  const conversation = Array.isArray(state.conversation) ? (state.conversation as Turn[]) : [];
-  if (danglingResult(conversation)) return "incomplete_routing_context";
-  return undefined;
+  return kept ?? unusable;
 }

@@ -29,7 +29,7 @@ npm install -g jev-gateway
 ```bash
 jev-codex      # use it exactly like `codex`
 jev-claude     # use it exactly like `claude`
-jev-opencode   # use it exactly like `opencode` (stable v1)
+jev-opencode   # use it exactly like `opencode` (proxy routing)
 jev-gemini     # Gemini CLI, with a Gemini API key
 ```
 
@@ -166,6 +166,11 @@ free-form tools such as `apply_patch`, tools declared inside the conversation, a
 request bodies. If the backend rejects a rewritten request, the gateway resends the original, so
 Codex never sees an error caused by the gateway.
 
+Responses direct mode requires explicit `store: false`. With `store: true` or omitted `store`,
+the provider creates the response so its ID can be used in a later stored session. Synthetic
+direct IDs are never stored upstream. Requests with `previous_response_id` bypass routing because
+the gateway cannot inspect the provider's retained history. This applies to streaming requests too.
+
 ## Using it with Claude Code
 
 `jev-claude` runs `claude` with only `ANTHROPIC_BASE_URL` set. Claude Code keeps using its saved
@@ -179,8 +184,9 @@ free to ignore. Expect better tool picks on large tool lists, not lower cost or 
 
 ## Using it with OpenCode
 
-Tested with stable OpenCode v1.18.31. OpenCode v2 is out of scope: no `previous_response_id`
-chaining, namespaces, or `additional_tools` behavior is assumed.
+The launcher uses the proxy transport. The optional advisory plugin targets OpenCode's
+`@opencode/plugin@2.0.12` API and is an alternative for native providers. In both paths OpenCode
+owns MCP discovery, execution, permissions, and the agent loop. The gateway routes model requests.
 
 **Quick path**
 
@@ -213,7 +219,7 @@ jev-opencode --dashboard      # open the monitoring dashboard in your browser
 | `TYPESAFE_API_KEY` | required | Authorizes the Jev tool-selection call only. Never sent as the LLM upstream credential |
 | `OPENAI_API_KEY` | your key | Your LLM credential. OpenCode resolves `{env:OPENAI_API_KEY}` and the gateway forwards it untouched to the LLM upstream |
 | `JEV_OPENCODE_UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | Where the gateway forwards OpenCode traffic: your LLM provider, not the TypeSafe endpoint |
-| `JEV_OPENCODE_MODEL` | `gpt-5` | Model selected as `jev-gateway/<model>` |
+| `JEV_OPENCODE_MODEL` | see below | Explicit nonempty value selects `jev-gateway/<model>` for both model keys |
 | `JEV_OPENCODE_PORT` | `8791` | Router port for OpenCode |
 
 The gateway forwards the client's `Authorization` header to the LLM upstream. A launcher-spawned
@@ -306,9 +312,65 @@ is the usual outcome: Jev picks the tool and the LLM fills in the free-form argu
 needs a fully closed schema (only enums, booleans, or constants), which fits small MCP-style tools
 with fixed choices rather than everyday file and shell tools.
 
-The launcher sets `OPENCODE_EXPERIMENTAL_NATIVE_LLM=false` and
-`OPENCODE_EXPERIMENTAL_CODE_MODE=false` for the launched process only. Those experimental modes
-are outside the supported path; the stable AI SDK provider above is the supported one.
+Direct arguments must satisfy the tool's schema. Supported schemas describe an object with
+`properties`, `required`, and boolean `additionalProperties`; the object type may be omitted.
+Properties may use constants, scalar enums, or booleans, with matching declared types or type
+unions. Known annotations (`title`, `description`, `default`, `examples`, `$comment`, `deprecated`,
+`readOnly`, and `writeOnly`) do not add constraints; defaults are never applied. Optional
+arguments can remain absent. OpenAI function tools may omit `parameters` to declare no arguments.
+Malformed schemas, contradictory closed values, ambiguous enum labels, references, composition,
+and other validation keywords delegate argument construction to the LLM without changing the schema.
+
+The launcher no longer overrides `OPENCODE_EXPERIMENTAL_NATIVE_LLM` or
+`OPENCODE_EXPERIMENTAL_CODE_MODE`. Existing environment values reach the client unchanged;
+this does not make an experimental v1 path a tested native-provider integration.
+
+Model selection follows this order:
+
+| Selection | Behavior |
+| --- | --- |
+| Explicit client `-m provider/model` | Passed through without injected arguments; client CLI selection wins |
+| Nonempty `JEV_OPENCODE_MODEL` | Sets both inline model keys to the requested gateway model |
+| Empty `JEV_OPENCODE_MODEL` | Adds no model override; preserves inherited inline keys and file-based selection |
+| Unset, with either inherited inline model key | Preserves both keys as supplied, including an absent `small_model` |
+| Unset, with neither inline model key | Defaults both keys to `jev-gateway/gpt-5` |
+
+An empty setting does not delete a model from the client's files or inherited inline configuration.
+MCP, permissions, plugins, provider options, model metadata and unrelated providers are preserved.
+Malformed provider objects are rejected before merging. On v2, use `jev-opencode --standalone`
+for an isolated session; explicit `--server` arguments are passed through, not reconfigured remotely.
+
+### Advisory plugin for native v2 providers
+
+Build with `pnpm build`, then configure the compiled plugin directory in the v2 client's settings:
+
+```json
+{
+  "rest": {
+    "plugins": [{
+      "package": "/absolute/path/to/jev-gateway/dist/plugin/jev",
+      "options": { "gatewayUrl": "http://127.0.0.1:8791", "timeoutMs": 1500 }
+    }]
+  }
+}
+```
+
+The package also exports loadable JavaScript at `jev-gateway/plugin`; its type dependencies are
+development-only. Start the decision gateway separately and run plain OpenCode with a native
+provider. The plugin adds a request-local hint to the last user message without changing system
+instructions or persisted messages. It never synthesizes a model response or executes a tool.
+Opaque/provider-executed content bypasses advice; gateway failures leave the request unchanged.
+
+Optional `gatewayApiKey` authenticates only `/router/decide` on a keyed gateway; redirects are
+rejected and this key is never added to provider requests. Keep the key in private client settings.
+`enabled: false` disables hook registration. Do not enable the plugin under `jev-opencode`: the
+launcher marks itself as proxy owner and the plugin rejects that combination. If a native-provider
+alias points at the same gateway origin, its HTTP hook disables proxy routing for that request,
+preventing a second decision. Synthetic direct responses remain exclusive to the proxy path.
+
+The advisory hook covers primary requests and continuations, not auxiliary title or compaction
+requests. Cold first-request MCP readiness, Code Mode, interactive approvals, and desktop CAD
+workflows require separate real-client qualification; unit tests alone do not establish them.
 
 ## Using it with Gemini
 
@@ -397,12 +459,46 @@ and the value of every closed-set argument. The answer selects a mode, which is 
 | `forced` | Jev is confident about the tool, but some arguments are open-ended | Forwarded with `tool_choice` set to that tool, so the LLM only fills in arguments. `ARGS_MODEL` can send these to a cheaper model |
 | `hint` | Jev is confident, but `tool_choice` cannot be changed (Anthropic with thinking on, or a cached conversation) | Forwarded with a one-line suggestion added after the client's last block, so cached prefixes stay valid |
 | `none` | Jev is confident that no tool is needed | Forwarded with `tool_choice: "none"` |
-| `passthrough` | Low confidence, the two checks disagree, Jev failed, there are no tools, or the caller already chose | Forwarded byte for byte. `x-jev-gateway-reason` says why |
+| `passthrough` | Low confidence, the two checks disagree, Jev failed, there are no tools, the caller already chose, or retained content contains media or opaque references | Forwarded byte for byte. `x-jev-gateway-reason` says why |
 
 Tool lists longer than 120 entries (Claude Code sends about 280) take two Jev calls. The first ranks
 the list in groups. The second decides among the top 3 of each group, using full descriptions.
 
+Routing state retains a contiguous suffix of complete call/result groups. Calls and results are
+associated by observed IDs; Gemini IDs are retained when supplied. Without IDs, only an unambiguous
+pending call with the same tool name can be associated. Overlapping parallel-call spans stay in
+their original chronological order. Orphaned or ambiguous retained results bypass Jev with
+`incomplete_routing_context`.
+
+Clipping is recorded as `clipped: true` in Jev's state, not inferred from conversation text.
+Ordinary clipped output still routes. The newest group can be shortened to fit while retaining
+its identities; if even its structure and metadata cannot fit, the request bypasses unchanged.
+The budget covers the complete JSON serialization, including escaping, envelope, and metadata,
+measured in JavaScript UTF-16 code units. Text clipping never splits a surrogate pair. Only Jev's
+request is shortened; the provider request and the caller's input remain intact.
+
 ## Configuration
+
+`JEV_TOOL_POLICIES` can leave selection to the main model (`passthrough`), allow Jev to select
+but not synthesize arguments (`selection-only`), or permit direct answers subject to the normal
+checks (`direct-eligible`). Unset or empty configuration preserves direct-eligible behavior.
+`JEV_DIRECT_CALLS=false` always wins. Policies never remove upstream tools or replace the client's
+execution permissions. If any roster tool is passthrough, Jev cannot suppress it with `none`.
+
+Use exact identities you have reviewed; names such as `get_` or `validate_` imply no safety:
+
+```bash
+JEV_TOOL_POLICIES='{"default":"passthrough","rules":[{"match":"fixture_status","policy":"selection-only"},{"match":"fixture_mode","policy":"direct-eligible"}]}'
+```
+
+Matching is case-folded. Exact matches beat wildcard patterns (`*` matches any sequence and `?`
+one Unicode code point); otherwise more non-wildcard characters win. Equal specificity uses the
+most restrictive policy: passthrough, then selection-only, then direct-eligible. Distinct roster
+names that collide after case-folding are passthrough. Patterns are prepared once at startup.
+Each wildcard match takes O(pattern length × name length) time and O(pattern length) space,
+without regex backtracking. Configuration accepts at most 128 rules and 128 UTF-16 code units per
+pattern; routing already limits names to 128 Unicode code points. Matching uses normalized names,
+so case-folding can expand their length. Unknown fields and invalid values stop startup.
 
 Settings are environment variables. The launchers read them from your shell,
 `~/.jev-gateway/.env`, or a checkout's own `.env`. See [.env.example](.env.example) for the full
@@ -415,8 +511,11 @@ list. The ones worth knowing:
 | `JEV_MIN_CONFIDENCE` | `0.7` | Below this confidence, the LLM decides. Lower it to route more, raise it to be more careful |
 | `JEV_ARG_MIN_CERTAINTY` | `0.8` | Every argument must reach this for a `direct` answer |
 | `JEV_DIRECT_CALLS` | `true` | Set to `false` so the gateway never answers without the LLM |
+| `JEV_TOOL_POLICIES` | unset | Inline JSON default and per-tool rules; passthrough decisions report `tool_policy_passthrough` |
 | `JEV_ROUTING` | `on` | Set to `off` to start in baseline mode |
 | `JEV_TIMEOUT_MS` | `4000` | How long to wait for Jev before letting the LLM decide |
+| `JEV_MAX_STATE_CHARS` | `60000` | Serialized routing-state budget; integer at least 64 |
+| `JEV_MAX_MESSAGE_CHARS` | `4000` | Per-text-field routing limit; positive integer |
 | `ARGS_MODEL` | unset | A cheaper model for filling arguments in `forced` mode |
 | `HOST` | `127.0.0.1` | Interface to listen on. Set `ROUTER_API_KEY` before exposing it |
 | `JEV_DEBUG_DUMP_DIR` | unset | Write requests and response summaries to this folder. Credentials in headers are redacted; bodies are written whole, system prompts and conversation included, in files only you can read |
@@ -432,8 +531,14 @@ Each request also logs one JSON line to stdout, or to `~/.jev-gateway/<client>.l
   a tool anyway, it may produce an incomplete reply and the agent will retry. Raise
   `JEV_MIN_CONFIDENCE` if you see this.
 - In `hint` mode the LLM still does its own reasoning, so the gain is accuracy, not cost.
-- Jev reads text only and has a 32k-token window. Images become placeholders and long conversations
-  keep their newest turns. It is most accurate in English.
+- Jev reads text only and has a 32k-token window. Requests retaining images, files, audio, or opaque
+  references bypass Jev (`multimodal_content`), including media-bearing tool results. Attachments
+  and the provider request stay unchanged; the gateway never downloads them. This replaces the
+  former image-placeholder behavior: an older retained screenshot can reduce routing throughout
+  a long session. The gateway does not assume that the image is no longer relevant. Gemini thought
+  signatures, text-only hosted-tool traces, refusals, and web-search results still permit routing.
+  Nested protocol content is inspected up to 32 levels; deeper content also bypasses. Text-only
+  conversations keep their newest turns. Jev is most accurate in English.
 - The default confidence thresholds are starting points. Use the dashboard and baseline mode to tune
   them for your own work.
 - A gateway started by a launcher has no key of its own, because the one `Authorization` header a

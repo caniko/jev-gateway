@@ -14,9 +14,8 @@ import {
   TOOL_KEY,
   type ToolPlan,
 } from "./questions.js";
-import { policyFor } from "./policies.js";
-import { validateDirectArgs } from "./schema.js";
-import { buildState, incompleteRoutingContext } from "./state.js";
+import { buildState } from "./state.js";
+import { normalizeToolName, policyFor } from "./policies.js";
 import type { Json, RouterInput, RouterTool } from "./types.js";
 
 /** The one Jev call the router makes; injectable so tests need no network. */
@@ -75,7 +74,7 @@ function resolveArgs(
   answers: Answers,
   minCertainty: number,
 ): { args: Record<string, Json>; certainty: number } | undefined {
-  const args: Record<string, Json> = {};
+  const args: Record<string, Json> = Object.create(null);
   let certainty = 1;
   for (const param of plan.closedParams ?? []) {
     if (param.kind === "const") {
@@ -130,10 +129,7 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
 
   const startedAt = performance.now();
   const state = buildState(input, config);
-  // Routing-relevant structured results that cannot be preserved safely
-  // bypass before any Jev call; ordinary text omission still routes.
-  const incomplete = incompleteRoutingContext(state);
-  if (incomplete) return { mode: "passthrough", reason: incomplete };
+  if (state.unrepresentable) return { mode: "passthrough", reason: "incomplete_routing_context" };
   let tools = input.tools;
   let shortlistTokens = 0;
   let result: SystemOneResult<Questions>;
@@ -181,6 +177,11 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   }
 
   if (!wantsTool) {
+    const roster = input.tools.map((tool) => tool.name);
+    if (new Set(roster.map(normalizeToolName)).size !== roster.length
+      || roster.some((name) => policyFor(name, config.toolPolicies) === "passthrough")) {
+      return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
+    }
     // A hint can suggest a tool; suggesting silence would only risk ending an agent's turn early.
     return config.onNone === "force_none" && input.steer !== "hint"
       ? { mode: "none", confidence: picked.confidence, jev }
@@ -196,30 +197,12 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   // Neither can namespaced ones: backends reject both `tool_choice.namespace` and the bare name.
   if (tool.namespace) return { mode: "passthrough", reason: "namespaced_tool_selected", jev };
 
-  // Per-tool policy: passthrough leaves selection+args to the main model
-  // (tools stay in the upstream request); selection-only may select but never
-  // synthesize; direct-eligible allows direct only when all gates pass.
-  // Global directCalls=false always wins. Policies are config-only: MCP
-  // descriptions/results cannot change them, and approvals stay authoritative.
-  // Absolute invariant + schema-sound gate also apply (PR1/PR2). A
-  // case-folded roster collision makes the policy identity ambiguous and
-  // resolves to passthrough (see policyFor). Checked against the original
-  // roster: shortlisting may already have narrowed `tools`, and a colliding
-  // candidate dropped there must still count as ambiguous.
-  const policy = policyFor(
-    plan.name,
-    config.toolPolicies,
-    input.tools.map((t) => t.name),
-  );
+  // Resolve against the full roster, including candidates removed by shortlisting.
+  const policy = policyFor(plan.name, config.toolPolicies, input.tools.map((tool) => tool.name));
   if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
 
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  // Transports that forbid synthetic answers (e.g. stored Responses
-  // sessions) still get selection via forced/hint, never direct.
-  if (
-    resolved && config.directCalls && policy === "direct-eligible" &&
-    validateDirectArgs(tool.parameters, resolved.args).ok && input.allowDirect !== false
-  ) {
+  if (config.directCalls && input.allowDirect !== false && policy === "direct-eligible" && resolved) {
     return {
       mode: "direct",
       tool: plan.name,

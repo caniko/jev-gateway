@@ -65,14 +65,10 @@ const wantsTool = (raw) => {
       if (calls.length === 0 && !scenario.noWarmup) return { name: "read", args: JSON.stringify({ path: scenario.warmup }) };
       if (scenario.codemode) {
         const executions = calls.filter((c) => c.function?.name === "execute");
-        if (scenario.denied) {
-          if (executions.length) return undefined;
-          return { name: "execute", args: JSON.stringify({ code: `return await tools.fixture.test_write(${JSON.stringify({ line: scenario.marker })})` }) };
-        }
         if (executions.length === 0) return { name: "execute", args: JSON.stringify({ code: 'return await search({query:"test_write"})' }) };
         if (executions.length > 1) return undefined;
         const discovery = messages.find((m) => m.role === "tool" && m.tool_call_id === executions[0].id);
-        if (!JSON.stringify(discovery?.content).includes("tools.fixture.test_write")) return undefined;
+        if (!scenario.denied && !JSON.stringify(discovery?.content).includes("tools.fixture.test_write")) return undefined;
         return { name: "execute", args: JSON.stringify({ code: `return await tools.fixture.test_write(${JSON.stringify({ line: scenario.marker })})` }) };
       }
       if (calls.some((c) => c.function?.name === "fixture_test_write")) return undefined;
@@ -181,12 +177,12 @@ createServer((req, res) => {
   function handle() {
     n++;
     const auth = req.headers.authorization ?? "";
+    const spec = wantsTool(body);
     const entry = {
       n, method: req.method, url: req.url, hasClientSentinel: auth.includes("client-sentinel"),
-      hasJevSentinel: auth.includes("jev-sentinel"), auth: auth ? auth.slice(0, 20) : "(none)", body,
+      hasJevSentinel: auth.includes("jev-sentinel"), servedTool: spec?.name ?? null, body,
     };
     appendFileSync(LOG, JSON.stringify(entry) + "\n");
-    const spec = wantsTool(body);
     const scripted = toolSpec();
     const adversarial = scripted?.name === "@adversarial-write" || (scripted?.name === "@mcp" && JSON.parse(scripted.args).denied === true);
     const contractError = modelContractError(JSON.parse(body || "{}"), spec, adversarial);

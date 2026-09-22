@@ -9,17 +9,20 @@
     "opencodeV2": {
       "version": "2.0.12",
       "npmTarball": "https://registry.npmjs.org/@opencode/cli/-/cli-2.0.12.tgz",
-      "integrity": "sha512-LwB0LD7LXZbfFDU12KwiUq5nPcjW1BzYpp81UPzEBpeZSNvszKXnTUa3l8JmLi6I6/WtQx/Z/8n2743FyY6lpg=="
+      "integrity": "sha512-LwB0LD7LXZbfFDU12KwiUq5nPcjW1BzYpp81UPzEBpeZSNvszKXnTUa3l8JmLi6I6/WtQx/Z/8n2743FyY6lpg==",
+      "role": "released compatibility baseline",
+      "candidatePinFile": "integration/opencode-candidate.json"
     },
     "blenderMcp": {
       "repo": "newo-ether/blender-mcp",
-      "rev": "ced81a5a220dd01240e67df2453dffeb8fb51daa",
-      "version": "1.19.0"
+      "rev": "37acac7fd25d424b23c8a84f27d6c16c848d810d",
+      "version": "1.18.0",
+      "qualification": "Canix patched tuple; fresh production results reported separately"
     },
     "freecadMcp": {
       "repo": "neka-nat/freecad-mcp",
-      "rev": "751974609a401660a58a1772ef16f3afbeba9ba1",
-      "version": "v0.1.24"
+      "rev": "63acb305573194a011641ab13ccfb391fe95769f",
+      "version": "0.1.18"
     }
   },
   "order": [
@@ -36,7 +39,8 @@
       "id": 17,
       "url": "https://github.com/vinilana/jev-gateway/pull/17",
       "branch": "fix/direct-calls-disabled",
-      "headSha": "43f4309653ea992665355b77f2251410ee99f962",
+      "headSha": "af1ddde4e24aae63111993f320ea656a6588ac98",
+      "ownDeltaBase": "a197836755671fc224cc3d7f91a8592d56ca665c",
       "dependencies": [],
       "state": "pending"
     },
@@ -44,7 +48,8 @@
       "id": 18,
       "url": "https://github.com/vinilana/jev-gateway/pull/18",
       "branch": "fix/direct-schema-validation",
-      "headSha": "31eb23cc12b93e96534f37e1f75e90e951dca824",
+      "headSha": "e26ddad6e12a11aa470f5e39e996f7247307dd28",
+      "ownDeltaBase": "af1ddde4e24aae63111993f320ea656a6588ac98",
       "dependencies": [
         "fix/direct-calls-disabled"
       ],
@@ -54,7 +59,8 @@
       "id": 19,
       "url": "https://github.com/vinilana/jev-gateway/pull/19",
       "branch": "feat/multimodal-routing-guard",
-      "headSha": "ab7d6da9b04886f3c4a30a8727c4b1f8554f90fe",
+      "headSha": "9e5a33be92dad3012f703928fb7f798dc7295299",
+      "ownDeltaBase": "a197836755671fc224cc3d7f91a8592d56ca665c",
       "dependencies": [],
       "state": "pending"
     },
@@ -62,7 +68,8 @@
       "id": 20,
       "url": "https://github.com/vinilana/jev-gateway/pull/20",
       "branch": "feat/tool-routing-policies",
-      "headSha": "80a1453632e6d021ac4604bdd22b9a2e3b5c3330",
+      "headSha": "806168abcb4a685e86c3b7fecb86f20f8ab1f816",
+      "ownDeltaBase": "e26ddad6e12a11aa470f5e39e996f7247307dd28",
       "dependencies": [
         "fix/direct-schema-validation"
       ],
@@ -72,7 +79,9 @@
       "id": 21,
       "url": "https://github.com/vinilana/jev-gateway/pull/21",
       "branch": "feat/opencode-v2",
-      "headSha": "e3f21b704293b16026928e4a67a8a7e5f5d4f350",
+      "headSha": "27f3c67909ebcff0d7685aaa84d0b1eb189f97c4",
+      "ownDeltaBase": "806168abcb4a685e86c3b7fecb86f20f8ab1f816",
+      "responsesFix": "82b4ed897200679633e8d7e2b6906c430c460d3a",
       "dependencies": [
         "feat/tool-routing-policies"
       ],
@@ -82,20 +91,19 @@
       "id": 22,
       "url": "https://github.com/vinilana/jev-gateway/pull/22",
       "branch": "fix/routing-context-integrity",
-      "headSha": "6cc4de8ec503471552f1f35887d9292b1b354f77",
-      "dependencies": [
-        "feat/opencode-v2"
-      ],
+      "headSha": "f2690120068cffd3485bff80370147185024bdaf",
+      "ownDeltaBase": "a197836755671fc224cc3d7f91a8592d56ca665c",
+      "dependencies": [],
       "state": "pending"
     },
     {
       "id": 23,
       "url": "https://github.com/vinilana/jev-gateway/pull/23",
       "branch": "test/opencode-v2-mcp-acceptance",
-      "headSha": "10b23683266068f5366b4e3cf83db1912681a3b9",
+      "headSha": "1866550617362b5ae0267810b13cbe21a3d168d4",
+      "ownDeltaBase": "27f3c67909ebcff0d7685aaa84d0b1eb189f97c4",
       "dependencies": [
-        "fix/routing-context-integrity",
-        "feat/multimodal-routing-guard"
+        "feat/opencode-v2"
       ],
       "state": "pending"
     }

@@ -11,6 +11,60 @@ function chatApp() {
 }
 
 describe("conservative multimodal passthrough", () => {
+  const parameters = { type: "object", properties: { query: { type: "string" } }, required: ["query"] };
+  const functionTool = { type: "function", name: "x", parameters };
+  it.each([
+    ["Gemini signatures and application JSON", "/v1beta/models/gemini:generateContent", {
+      contents: [
+        { role: "model", parts: [{ functionCall: { name: "x", args: { media: "print" } }, thoughtSignature: "signature" }] },
+        { role: "user", parts: [{ functionResponse: { name: "x", response: { entries: [{ type: "blob", blob: "abc" }] } } }] },
+        { role: "user", parts: [{ text: "continue" }] },
+      ], tools: [{ functionDeclarations: [{ name: "x", parameters }] }],
+    }],
+    ["Responses hosted traces and refusals", "/v1/responses", {
+      model: "m", input: [
+        { type: "web_search_call", id: "w", status: "completed" },
+        { type: "file_search_call", id: "f", status: "completed" },
+        { type: "computer_call", id: "c", action: { type: "click", x: 1, y: 2 } },
+        { type: "message", role: "assistant", content: [{ type: "refusal", refusal: "No" }] },
+        { role: "user", content: "continue" },
+      ], tools: [functionTool],
+    }],
+    ["Messages web-search results", "/v1/messages", {
+      model: "m", messages: [
+        { role: "assistant", content: [{ type: "server_tool_use", id: "w", name: "web_search", input: { query: "x" } }] },
+        { role: "user", content: [{ type: "web_search_tool_result", tool_use_id: "w", content: [
+          { type: "web_search_result", url: "https://example.test", title: "Example", encrypted_content: "citation" },
+        ] }] },
+        { role: "user", content: "continue" },
+      ], tools: [{ name: "x", input_schema: parameters }],
+    }],
+  ])("still routes text-only %s", async (_name, path, body) => {
+    const { app, jev, upstream } = chatApp();
+    const before = structuredClone(body);
+    const res = await app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(jev.requests).toHaveLength(1);
+    expect(upstream.calls).toHaveLength(1);
+    expect(body).toEqual(before);
+  });
+
+  it.each([
+    ["/v1/responses", { model: "m", input: [{ type: "computer_call_output", call_id: "c", output: { type: "computer_screenshot", image_url: "https://example.test/image" } }], tools: [functionTool] }],
+    ["/v1/responses", { model: "m", input: [{ role: "user", content: [{ type: "input_file", file_id: "file-1" }] }], tools: [functionTool] }],
+    ["/v1/chat/completions", { model: "m", messages: [{ role: "user", content: [{ type: "input_audio", input_audio: { data: "AAA", format: "wav" } }] }], tools: [{ type: "function", function: { name: "x", parameters } }] }],
+    ["/v1/messages", { model: "m", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "c", content: [{ type: "document", source: { type: "url", url: "https://example.test/document" } }] }] }], tools: [{ name: "x", input_schema: parameters }] }],
+  ])("forwards actual attachments unchanged on %s, including streaming", async (path, body) => {
+    const { app, jev, upstream } = chatApp();
+    const request = { ...body, stream: true };
+    const res = await app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("passthrough");
+    expect(res.headers.get("x-jev-gateway-reason")).toBe(MULTIMODAL_SKIP);
+    expect(jev.requests).toHaveLength(0);
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0]!.body).toEqual(request);
+  });
+
   it("bypasses user screenshots without a Jev call, preserving body and model", async () => {
     const { app, jev, upstream } = chatApp();
     const body = {

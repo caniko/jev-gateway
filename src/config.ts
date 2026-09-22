@@ -26,7 +26,6 @@ export interface Config {
   argMinCertainty: number;
   onNone: "force_none" | "passthrough";
   directCalls: boolean;
-  /** Per-tool routing policies. Global directCalls=false always wins. */
   toolPolicies: PolicyConfig;
   /** False starts the gateway as a plain metering proxy; the dashboard can flip it at runtime. */
   routing: boolean;
@@ -83,9 +82,7 @@ export function loadConfig(env: Env = process.env): Config {
     argMinCertainty: num(env, "JEV_ARG_MIN_CERTAINTY", 0.8),
     onNone,
     directCalls: bool(env, "JEV_DIRECT_CALLS", true),
-    // Invalid explicit policy must not silently become permissive: parse
-    // throws, failing closed at startup instead of allowing direct.
-    toolPolicies: parsePolicyConfig(str(env, "JEV_TOOL_POLICIES") ?? ""),
+    toolPolicies: parsePolicyConfig(env.JEV_TOOL_POLICIES),
     routing: bool(env, "JEV_ROUTING", true),
     maxStateChars: num(env, "JEV_MAX_STATE_CHARS", 60_000),
     maxMessageChars: num(env, "JEV_MAX_MESSAGE_CHARS", 4_000),
@@ -96,13 +93,13 @@ export function loadConfig(env: Env = process.env): Config {
   if (config.routerApiKey && !config.upstreamApiKey) {
     throw new Error("ROUTER_API_KEY requires UPSTREAM_API_KEY (the client key is not valid upstream)");
   }
-  for (const [key, value] of [
-    ["JEV_MAX_STATE_CHARS", config.maxStateChars],
-    ["JEV_MAX_MESSAGE_CHARS", config.maxMessageChars],
+  for (const [key, value, minimum] of [
+    ["JEV_MAX_STATE_CHARS", config.maxStateChars, 64],
+    ["JEV_MAX_MESSAGE_CHARS", config.maxMessageChars, 1],
   ] as const) {
-    if (!Number.isInteger(value) || value <= 0)
-      throw new Error(`${key} must be a positive integer, got "${String(value)}"`);
+    if (!Number.isSafeInteger(value) || value < minimum) {
+      throw new Error(`${key} must be an integer of at least ${minimum}, got "${env[key] ?? value}"`);
+    }
   }
-  if (config.maxStateChars < 64) throw new Error("JEV_MAX_STATE_CHARS must be at least 64");
   return config;
 }

@@ -1,6 +1,6 @@
 import type { Questions } from "@typesafe-ai/sdk";
-import { isDirectEligibleSchema } from "./schema.js";
 import { truncate } from "./state.js";
+import { closedValues, isRecord, matchesType, supportedSchema } from "./schema.js";
 import type { Json, JsonSchema, RouterTool } from "./types.js";
 
 /** Choice label meaning "reply in text, call nothing". */
@@ -36,7 +36,8 @@ export interface ToolPlan {
 }
 
 function closedParam(name: string, schema: JsonSchema, required: boolean): ClosedParam | undefined {
-  if ("const" in schema) return { name, required, kind: "const", value: schema.const as Json };
+  if (!supportedSchema(schema, ["type", "const", "enum"]) || !closedValues(schema)) return undefined;
+  if (Object.hasOwn(schema, "const")) return { name, required, kind: "const", value: schema.const as Json };
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     if (schema.enum.length === 1) return { name, required, kind: "const", value: schema.enum[0]! };
     const values = new Map<string, Json>();
@@ -48,18 +49,24 @@ function closedParam(name: string, schema: JsonSchema, required: boolean): Close
     if (values.size !== schema.enum.length || values.size > 255) return undefined;
     return { name, required, kind: "enum", description: schema.description, values };
   }
-  if (schema.type === "boolean") return { name, required, kind: "boolean", description: schema.description };
+  if (schema.type === "boolean" || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === "boolean")) {
+    return { name, required, kind: "boolean", description: schema.description };
+  }
   return undefined;
 }
 
 export function planTool(tool: RouterTool): ToolPlan {
   const schema = tool.parameters;
-  // Only function tools take JSON arguments. Missing, malformed, or
-  // unsupported schemas are never an empty-argument tool: they stay
-  // plannable for forced/hint but never direct-eligible.
+  // Only function tools take JSON arguments, and without a recognizable object schema
+  // there is nothing safe to infer about them.
   if (tool.kind !== "function") return { name: tool.name };
-  if (!isDirectEligibleSchema(schema)) return { name: tool.name };
-  const required = new Set(schema?.required ?? []);
+  if (!supportedSchema(schema, ["type", "properties", "required", "additionalProperties"]) || !matchesType({}, schema.type)) return { name: tool.name };
+  if (Object.hasOwn(schema, "properties") && !isRecord(schema.properties)) return { name: tool.name };
+  if (Object.hasOwn(schema, "required") && (!Array.isArray(schema.required) || !schema.required.every((name) => typeof name === "string")
+    || new Set(schema.required).size !== schema.required.length)) return { name: tool.name };
+  if (Object.hasOwn(schema, "additionalProperties") && typeof schema.additionalProperties !== "boolean") return { name: tool.name };
+  const required = new Set(schema.required ?? []);
+  if ([...required].some((name) => !Object.hasOwn(schema.properties ?? {}, name))) return { name: tool.name };
   const closedParams: ClosedParam[] = [];
   for (const [name, property] of Object.entries(schema?.properties ?? {})) {
     const param = closedParam(name, property, required.has(name));
@@ -138,13 +145,7 @@ export function buildQuestions(
         "Does the assistant need to call one of its tools now, rather than reply to the user in plain text?",
     },
   };
-  if (!options.withArgs) {
-    // Absolute: when argument questions are disabled, no plan may retain
-    // closed-set arguments. Otherwise empty/const-only tools would still
-    // resolve to `direct` in decide() without any arg questions asked.
-    for (const plan of plans) delete plan.closedParams;
-    return { questions, plans };
-  }
+  if (!options.withArgs) return { questions, plans };
 
   let argQuestions = 0;
   plans.forEach((plan, toolIndex) => {
