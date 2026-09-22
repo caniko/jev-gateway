@@ -169,6 +169,7 @@ const CATEGORIES = [
 const REASONS = {
   multimodal_content: ["Jev not asked", "Retained media or opaque content needs the main model; the original request was forwarded unchanged."],
   no_tools: ["Jev not asked", "The request carried no tools, so there was nothing to select."],
+  incomplete_routing_context: ["Jev not asked", "Retained call/result identities are ambiguous or their structure cannot fit the routing-state budget."],
   no_messages: ["Jev not asked", "The request had no conversation to decide on."],
   previous_response_id: ["Jev not asked", "The conversation lives upstream (previous_response_id); the router can't see it."],
   non_function_tools: ["Jev not asked", "The roster has tools that aren't plain functions."],
