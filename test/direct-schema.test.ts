@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { planTool } from "../src/questions.js";
@@ -16,6 +17,32 @@ async function route(parameters: unknown, extraAnswers = {}, omit = false) {
 }
 
 describe("closed argument schemas", () => {
+  it("uses JSON equality for constant/enum intersections, including negative zero and object key order", () => {
+    for (const [constant, value] of [[-0, 0], [{ a: -0, b: 1 }, { b: 1, a: 0 }]] as const) {
+      expect(planTool({ kind: "function", name: "status", parameters: {
+        properties: { value: { const: constant, enum: [value] } }, required: ["value"],
+      } }).closedParams).toHaveLength(1);
+    }
+    expect(planTool({ kind: "function", name: "status", parameters: {
+      properties: { value: { const: 0, enum: [0, -0] } },
+    } }).closedParams).toBeUndefined();
+  });
+
+  it("validates a large constant enum within a subprocess deadline", () => {
+    const module = new URL("../src/questions.ts", import.meta.url).href;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import { planTool } from ${JSON.stringify(module)};
+      const values = Array.from({length:100000}, (_, index) => index);
+      const plan = planTool({kind:'function',name:'status',parameters:{type:'object',properties:{value:{const:99999,enum:values}},required:['value']}});
+      assert.equal(plan.closedParams.length, 1);
+      console.log('validated');
+    `], { timeout: 5000, encoding: "utf8", env: { PATH: process.env.PATH ?? "" } });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout.trim()).toBe("validated");
+  });
+
   it.each([
     { title: "Status", type: "object", properties: { value: { title: "Value", type: "string", enum: ["ok"], examples: ["ok"] } }, required: ["value"] },
     { properties: { value: { type: ["string", "null"], enum: [null] } }, required: ["value"], additionalProperties: false },

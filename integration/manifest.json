@@ -48,7 +48,7 @@
       "id": 18,
       "url": "https://github.com/vinilana/jev-gateway/pull/18",
       "branch": "fix/direct-schema-validation",
-      "headSha": "e26ddad6e12a11aa470f5e39e996f7247307dd28",
+      "headSha": "ba7e1ffd865ba1652f650fc1ca0f01ec83bb0cf1",
       "ownDeltaBase": "af1ddde4e24aae63111993f320ea656a6588ac98",
       "dependencies": [
         "fix/direct-calls-disabled"
@@ -68,8 +68,8 @@
       "id": 20,
       "url": "https://github.com/vinilana/jev-gateway/pull/20",
       "branch": "feat/tool-routing-policies",
-      "headSha": "806168abcb4a685e86c3b7fecb86f20f8ab1f816",
-      "ownDeltaBase": "e26ddad6e12a11aa470f5e39e996f7247307dd28",
+      "headSha": "793564b1462b306b6b78cc653e8175441bbe53a2",
+      "ownDeltaBase": "ba7e1ffd865ba1652f650fc1ca0f01ec83bb0cf1",
       "dependencies": [
         "fix/direct-schema-validation"
       ],
@@ -79,9 +79,9 @@
       "id": 21,
       "url": "https://github.com/vinilana/jev-gateway/pull/21",
       "branch": "feat/opencode-v2",
-      "headSha": "bc3a5db5d9737d9baf233b3cc8f70f355df36f28",
-      "ownDeltaBase": "806168abcb4a685e86c3b7fecb86f20f8ab1f816",
-      "responsesFix": "82b4ed897200679633e8d7e2b6906c430c460d3a",
+      "headSha": "8ac1b82f1edf182b6dc70f7705658e8b28a31bdc",
+      "ownDeltaBase": "793564b1462b306b6b78cc653e8175441bbe53a2",
+      "responsesFix": "9ca0a6871a493a7011b3b7d47d0d13a8002b35e1",
       "dependencies": [
         "feat/tool-routing-policies"
       ],
@@ -100,8 +100,8 @@
       "id": 23,
       "url": "https://github.com/vinilana/jev-gateway/pull/23",
       "branch": "test/opencode-v2-mcp-acceptance",
-      "headSha": "8f1cd1d6a894d1c358cb79ec4666e5d248da56c2",
-      "ownDeltaBase": "bc3a5db5d9737d9baf233b3cc8f70f355df36f28",
+      "headSha": "aeb320c3cf3060a7703e43d0f2d0ad7c21cdfddc",
+      "ownDeltaBase": "8ac1b82f1edf182b6dc70f7705658e8b28a31bdc",
       "dependencies": [
         "feat/opencode-v2"
       ],

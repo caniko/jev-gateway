@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import type { Json, JsonSchema } from "./types.js";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -15,6 +14,12 @@ function isJson(value: unknown, depth = 0): value is Json {
 }
 
 const TYPES = new Set(["null", "boolean", "string", "number", "integer", "array", "object"]);
+
+/** JSON Schema compares object values without key order and treats negative zero as zero. */
+function valueKey(value: Json): string {
+  return JSON.stringify(value, (_key, item: unknown) => isRecord(item)
+    ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) : item);
+}
 
 function validType(type: unknown): boolean {
   return type === undefined || (typeof type === "string" && TYPES.has(type))
@@ -46,13 +51,15 @@ export function supportedSchema(value: unknown, keys: string[]): value is JsonSc
 
 /** Validate every value the closed-set planner can synthesize, before asking Jev. */
 export function closedValues(schema: JsonSchema): boolean {
+  let values: Set<string> | undefined;
   if (Object.hasOwn(schema, "enum")) {
     if (!Array.isArray(schema.enum) || schema.enum.length === 0 || !schema.enum.every((item) => isJson(item))) return false;
-    if (schema.enum.some((item, index, values) => values.slice(0, index).some((prior) => isDeepStrictEqual(item, prior)))) return false;
+    values = new Set(schema.enum.map(valueKey));
+    if (values.size !== schema.enum.length) return false;
   }
   if (Object.hasOwn(schema, "const")) {
     return isJson(schema.const) && matchesType(schema.const, schema.type)
-      && (!schema.enum || schema.enum.some((item) => isDeepStrictEqual(item, schema.const)));
+      && (!values || values.has(valueKey(schema.const)));
   }
   return !schema.enum || schema.enum.every((item) => matchesType(item, schema.type));
 }
