@@ -22,8 +22,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const VERSION = "2.0.12";
-const CLI_SHA256 = "2b0825721cb12f9bca3d5099588087d557a21ed2b5b56efebea3f17dc5f79e6a";
+const pinPath = process.argv.find((a) => a.startsWith("--runtime-pin="))?.slice("--runtime-pin=".length);
+const pin = pinPath ? JSON.parse(readFileSync(pinPath, "utf8")) : {
+  version: "2.0.12", sha256: "2b0825721cb12f9bca3d5099588087d557a21ed2b5b56efebea3f17dc5f79e6a", firstTurnReady: false,
+};
+if (!/^[a-zA-Z0-9.-]+$/.test(pin.version ?? "") || !/^[a-f0-9]{64}$/.test(pin.sha256 ?? "") || typeof pin.firstTurnReady !== "boolean") throw new Error("invalid explicit runtime pin");
+const VERSION = pin.version;
+const CLI_SHA256 = pin.sha256;
 const args = new Set(process.argv.slice(2));
 const KEEP = args.has("--keep");
 
@@ -55,6 +60,7 @@ function resolveBinary() {
     return { bin: direct };
   }
   if (!args.has("--install-binary")) return { blocked: "set OPENCODE_V2_BIN/--binary or pass --install-binary to fetch the pinned artifact" };
+  if (pinPath) return { error: "an explicit runtime pin requires its already-built OPENCODE_V2_BIN" };
   try {
     execFileSync("npm", ["install", "--prefix", join(work, "v2bin"), "--no-audit", "--no-fund", `@opencode/cli@${VERSION}`], { stdio: "pipe", timeout: 180000 });
     execFileSync("node", [join(work, "v2bin/node_modules/@opencode/cli/postinstall.mjs")], { stdio: "pipe", timeout: 60000 });
@@ -152,7 +158,10 @@ const ALL_CHECKS = [
   "binary-version", "installed-artifact", "text-roundtrip", "native-tool-loop", "mcp-connection",
   "mcp-invocation", "mcp-denial", "mcp-codemode-invocation", "mcp-codemode-denial",
   "mcp-direct-ask-once", "mcp-direct-ask-reject", "mcp-nested-ask-once", "mcp-nested-ask-reject",
+  "plugin-lifecycle-enable", "plugin-lifecycle-disable", "plugin-lifecycle-reenable", "plugin-lifecycle-reload",
+  "mcp-cancel-before-approval", "mcp-cancel-before-commit", "mcp-cancel-after-commit",
   "selection-via-opencode", "plugin-influence", "plugin-fail-open", "plugin-only-influence",
+  "direct-via-opencode",
   "multi-turn-continuity", "deny-write-side-effect-free", "ask-write-safe-default",
   "image-bypass-via-gateway", "credentials-routing", "jev-auth-credential",
   "standalone-isolation", "shared-service-existing", "gateway-health",
@@ -265,7 +274,8 @@ try {
   installedGateway = join(work, "pkginstall/node_modules/jev-gateway/dist/index.js");
   if (!existsSync(join(packagedPluginDir, "index.ts"))) throw new Error("tarball lacks plugin/jev/index.ts");
   if (!existsSync(installedGateway)) throw new Error("tarball lacks dist/index.js");
-  report("installed-artifact", "PASS", `tarball ${installedDigest.slice(0, 19)}…, gateway+plugin installed without devDeps`);
+  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: GATEWAY_ROOT, encoding: "utf8" }).trim();
+  report("installed-artifact", "PASS", `source=${sourceSha}, tarball=${installedDigest}, gateway+plugin installed without devDeps`);
 } catch (e) {
   fail("preflight", `installed artifact setup failed: ${String(e.message ?? e).slice(0, 200)}`);
   printSummary();
@@ -316,9 +326,9 @@ writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
 {
   const logFile = join(iso.data, "opencode/log/opencode.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
-  if (/mcp connected.*fixture.*tools=2/.test(log))
-    report("mcp-connection", "PASS", "server connected fixture with 2 tools (log evidence only)");
-  else fail("mcp-connection", "no fixture-tools=2 line in server log");
+  if (/mcp connected.*fixture.*tools=3/.test(log))
+    report("mcp-connection", "PASS", "server connected fixture with 3 tools (log evidence only)");
+  else fail("mcp-connection", "no fixture-tools=3 line in server log");
 }
 for (const codemode of [false, true]) for (const denied of [false, true]) {
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { fixture_test_write: denied ? "deny" : "allow" } });
@@ -327,10 +337,10 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   cfg.mcp.servers.fixture.codemode = codemode;
   writeFileSync(configPath, JSON.stringify(cfg));
   const marker = codemode ? "nested-mcp-proof" : "direct-mcp-proof";
-  writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, denied, marker, warmup: configPath })}`);
+  writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, denied, marker, warmup: configPath, noWarmup: pin.firstTurnReady })}`);
   // The first-turn snapshot races MCP startup in v2.0.12. A realistic
   // response delay lets its debounced catalog update precede continuation.
-  writeFileSync(join(project, "delayms"), "1200");
+  writeFileSync(join(project, "delayms"), pin.firstTurnReady ? "0" : "1200");
   const before = modelLog().length;
   const result = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "Use the disposable fixture tool once."]);
   rmSync(join(project, "delayms"));
@@ -393,8 +403,8 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
       // Connected status precedes the debounced tool-registry refresh.
       // Retain the bounded harmless first turn; this suite qualifies
       // permission decisions, not cold first-request catalog readiness.
-      writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, marker, warmup: path })}`);
-      writeFileSync(join(project, "delayms"), "1200");
+      writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ codemode, marker, warmup: path, noWarmup: pin.firstTurnReady })}`);
+      writeFileSync(join(project, "delayms"), pin.firstTurnReady ? "0" : "1200");
       const session = await client.session.create({
         location: { directory: project }, model: { providerID: "acc-probe", id: "acc-model" },
         permissions: [
@@ -420,6 +430,75 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
       rmSync(join(project, "delayms"));
       rmSync(join(project, "toolmode"));
     }
+    for (const phase of ["before-approval", "before-commit", "after-commit"]) {
+      writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
+      const path = join(project, "opencode.json");
+      const cfg = JSON.parse(readFileSync(path, "utf8"));
+      const eventsPath = join(project, `events-${phase}.jsonl`);
+      const releasePath = join(project, `release-${phase}`);
+      cfg.mcp.servers.fixture.environment.FIXTURE_EVENTS = eventsPath;
+      if (phase === "before-commit") cfg.mcp.servers.fixture.environment.FIXTURE_BEFORE_COMMIT = releasePath;
+      if (phase === "after-commit") cfg.mcp.servers.fixture.environment.FIXTURE_AFTER_COMMIT = releasePath;
+      writeFileSync(path, JSON.stringify(cfg));
+      await client.location.reload();
+      const events = () => existsSync(eventsPath) ? readFileSync(eventsPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
+      writeFileSync(join(project, "toolmode"), `@mcp ${JSON.stringify({ marker: phase, warmup: path })}`);
+      writeFileSync(join(project, "delayms"), "1200");
+      const session = await client.session.create({
+        location: { directory: project }, model: { providerID: "acc-probe", id: "acc-model" },
+        permissions: [
+          { action: "*", resource: "*", effect: "allow" },
+          { action: "fixture_test_write", resource: "*", effect: phase === "before-approval" ? "ask" : "allow" },
+        ],
+      });
+      const prompt = { sessionID: session.id, id: `msg_fixture_${phase}`, text: "One disposable fixture mutation." };
+      await client.session.prompt(prompt);
+      await waitFor(async () => phase === "before-approval"
+        ? (await client.permission.list({ sessionID: session.id })).some((p) => p.action === "fixture_test_write")
+        : events().some((e) => e.event === (phase === "before-commit" ? "started" : "committed")),
+      30000, `mutation checkpoint ${phase}`);
+      const expected = phase === "after-commit" ? `write:${phase}\n` : "";
+      if (readFileSync(join(project, "counter.log"), "utf8") !== expected) throw new Error(`wrong pre-interrupt counter at ${phase}`);
+      await client.session.interrupt({ sessionID: session.id });
+      await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30000) });
+      if (phase !== "before-approval") await waitFor(() => events().some((e) => e.event === "cancelled"), 5000, "MCP cancellation notification");
+      writeFileSync(releasePath, "release");
+      rmSync(join(project, "toolmode"));
+      rmSync(join(project, "delayms"));
+      // Exact retry of the same admitted input must not replay a committed
+      // or cancelled tool call. The scripted model now returns text only.
+      await client.session.prompt(prompt);
+      await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30000) });
+      const commits = events().filter((e) => e.event === "committed").length;
+      const starts = events().filter((e) => e.event === "started").length;
+      const valid = readFileSync(join(project, "counter.log"), "utf8") === expected
+        && commits === Number(phase === "after-commit") && starts === Number(phase !== "before-approval");
+      if (valid) report(`mcp-cancel-${phase}`, "PASS", `exact prompt retry: starts=${starts}, commits=${commits}`);
+      else fail(`mcp-cancel-${phase}`, `starts=${starts}, commits=${commits}`);
+    }
+    // Keep the same authenticated server alive across plugin changes. Each
+    // primary request must consult Jev once when enabled, zero when disabled,
+    // including a repeated reload that used to be untested by fresh CLIs.
+    await rejev("read");
+    for (const phase of ["enable", "disable", "reenable", "reload"]) {
+      const enabled = phase !== "disable";
+      writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, {
+        rest: { plugins: [{ package: packagedPluginDir, options: { gatewayUrl: GW.replace(/\/v1$/, ""), timeoutMs: 8000, enabled } }] },
+      });
+      await client.location.reload();
+      const before = modelLog().length;
+      const consultations = jevCalls();
+      const session = await client.session.create({ location: { directory: project }, model: { providerID: "acc-probe", id: "acc-model" } });
+      await client.session.prompt({ sessionID: session.id, text: `Plugin lifecycle ${phase}.` });
+      await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30000) });
+      const sent = modelLog().slice(before);
+      const hints = sent.filter((r) => (r.body ?? "").includes("[jev-routing]")).length;
+      const delta = jevCalls() - consultations;
+      if (delta === Number(enabled) && hints === Number(enabled)) {
+        report(`plugin-lifecycle-${phase}`, "PASS", `Jev calls=${delta}, hint-bearing requests=${hints}`);
+      } else fail(`plugin-lifecycle-${phase}`, `Jev calls=${delta}, hint-bearing requests=${hints}`);
+    }
+    await rejev("no_tool_needed");
   } catch (error) {
     fail("mcp-interactive-permissions", error.message);
   } finally {
@@ -429,20 +508,53 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
 {
   // selection through the real binary + gateway: mock-jev picks read (open
   // schema, so delegation must be forced with tool_choice, never direct).
-  await rejev("read");
+  await rejev("read,no_tool_needed");
   writeProject(GW);
-  writeFileSync(join(project, "readable.txt"), "fixture content\n");
+  const marker = "selection-read-proof";
+  writeFileSync(join(project, "readable.txt"), `${marker}\n`);
+  writeFileSync(join(project, "toolmode"), `read ${JSON.stringify({ path: join(project, "readable.txt") })}`);
+  const before = modelLog().length;
   const jevBefore = jevCalls();
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
-  const entries = modelLog();
+  const entries = modelLog().slice(before);
   const forced = entries.some((e) => {
     try { return JSON.stringify(JSON.parse(e.body).tool_choice ?? "").includes("read"); } catch { return false; }
   });
   const jevDelta = jevCalls() - jevBefore;
+  const executed = entries.some((e) => {
+    try { return (JSON.parse(e.body).messages ?? []).some((m) => m.role === "tool" && JSON.stringify(m.content).includes(marker)); } catch { return false; }
+  });
+  rmSync(join(project, "toolmode"));
   await rejev("no_tool_needed");
-  if (r.code === 0 && forced && jevDelta > 0 && r.out.includes("acceptance-final-answer"))
+  if (r.code === 0 && forced && executed && jevDelta > 0 && r.out.includes("acceptance-final-answer"))
     report("selection-via-opencode", "PASS", "Jev selection reached model as forced tool_choice, tool ran");
   else fail("selection-via-opencode", `exit=${r.code} forced=${forced} jevDelta=${jevDelta}`);
+}
+{
+  // Direct synthesis through OpenCode must actually invoke the MCP tool
+  // once, return its result to the model, and skip the corresponding model
+  // request. A log mode alone or a fabricated result is insufficient.
+  await rejev("read,fixture_test_status,no_tool_needed");
+  writeProject(GW);
+  writeFileSync(join(project, "toolmode"), `@status ${JSON.stringify({ warmup: join(project, "opencode.json") })}`);
+  writeFileSync(join(project, "delayms"), "1200");
+  rmSync(join(project, "counter.log.status"), { force: true });
+  const before = modelLog().length;
+  const logBefore = gateway.log.join("").length;
+  const result = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "Read the fixture status once."]);
+  const requests = modelLog().slice(before).map((e) => JSON.parse(e.body || "{}"));
+  const primary = requests.filter((b) => (b.tools ?? []).length);
+  const seenResult = primary.some((b) => (b.messages ?? []).some((m) => m.role === "tool" && JSON.stringify(m.content).includes("fixture-status:ready")));
+  const direct = gateway.log.join("").slice(logBefore).split("\n").some((line) => {
+    try { const e = JSON.parse(line); return e.mode === "direct" && e.tool === "fixture_test_status"; } catch { return false; }
+  });
+  const count = existsSync(join(project, "counter.log.status")) ? readFileSync(join(project, "counter.log.status"), "utf8") : "";
+  if (result.code === 0 && direct && count === "read\n" && primary.length === 2 && seenResult && result.out.includes("acceptance-final-answer"))
+    report("direct-via-opencode", "PASS", "one real MCP status call; result returned; one model request skipped");
+  else fail("direct-via-opencode", `exit=${result.code} direct=${direct} count=${JSON.stringify(count)} modelRequests=${primary.length} result=${seenResult}`);
+  rmSync(join(project, "toolmode"));
+  rmSync(join(project, "delayms"));
+  await rejev("no_tool_needed");
 }
 {
   // Plugin influence + lifecycle through the real binary, using the
@@ -453,17 +565,18 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   {
     const pluginDir = packagedPluginDir;
     await rejev("read");
-    writeProject(GW, { rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: GW.replace(/\/v1$/, ""), timeoutMs: 8000 } }] } });
+    writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: GW.replace(/\/v1$/, ""), timeoutMs: 8000 } }] } });
+    const first = modelLog().length;
     const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
-    const hints = modelLog().filter((e) => (e.body ?? "").includes("[jev-routing]")).length;
+    const hints = modelLog().slice(first).filter((e) => (e.body ?? "").includes("[jev-routing]")).length;
     await rejev("no_tool_needed");
-    if (r.code === 0 && hints >= 1 && r.out.includes("acceptance-final-answer"))
+    if (r.code === 0 && hints === 1 && r.out.includes("acceptance-final-answer"))
       report("plugin-influence", "PASS", `routing hint reached model traffic ${hints}x, session completed (load+hook proven)`);
     else fail("plugin-influence", `exit=${r.code} hints=${hints}`);
 
     // Fail-open: with the gateway down, the loaded plugin must not break
     // the run and must append no hint.
-    writeProject(GW, { rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: "http://127.0.0.1:19999", timeoutMs: 2000 } }] } });
+    writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { rest: { plugins: [{ package: pluginDir, options: { gatewayUrl: "http://127.0.0.1:19999", timeoutMs: 2000 } }] } });
     const before = modelLog().length;
     const r2 = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "read the fixture file"]);
     const hints2 = modelLog().slice(before).filter((e) => (e.body ?? "").includes("[jev-routing]")).length;
@@ -516,7 +629,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
 {
   // deny: native write is gated by the `edit` action; refused -> file absent, run completes
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`, { permission: { edit: "deny" } });
-  writeFileSync(join(project, "toolmode"), `write {"path":"${join(project, "must-not-exist.txt")}", "content": "x"}`);
+  writeFileSync(join(project, "toolmode"), `@adversarial-write {"path":"${join(project, "must-not-exist.txt")}", "content": "x"}`);
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "write the file"]);
   try { rmSync(join(project, "toolmode")); } catch {}
   const absent = !existsSync(join(project, "must-not-exist.txt"));
