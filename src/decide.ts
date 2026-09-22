@@ -201,7 +201,7 @@ export async function decide(input: RouterInput, config: Config, askJev: AskJev)
   if (policy === "passthrough") return { mode: "passthrough", reason: "tool_policy_passthrough", jev };
 
   const resolved = plan.closedParams && resolveArgs(plan, toolIndex, result.answers, config.argMinCertainty);
-  if (config.directCalls && policy === "direct-eligible" && resolved) {
+  if (config.directCalls && input.allowDirect !== false && policy === "direct-eligible" && resolved) {
     return {
       mode: "direct",
       tool: plan.name,
