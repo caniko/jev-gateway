@@ -29,7 +29,7 @@ npm install -g jev-gateway
 ```bash
 jev-codex      # use it exactly like `codex`
 jev-claude     # use it exactly like `claude`
-jev-opencode   # use it exactly like `opencode` (stable v1)
+jev-opencode   # use it exactly like `opencode` (proxy routing)
 jev-gemini     # Gemini CLI, with a Gemini API key
 ```
 
@@ -166,6 +166,11 @@ free-form tools such as `apply_patch`, tools declared inside the conversation, a
 request bodies. If the backend rejects a rewritten request, the gateway resends the original, so
 Codex never sees an error caused by the gateway.
 
+Responses direct mode requires explicit `store: false`. With `store: true` or omitted `store`,
+the provider creates the response so its ID can be used in a later stored session. Synthetic
+direct IDs are never stored upstream. Requests with `previous_response_id` bypass routing because
+the gateway cannot inspect the provider's retained history. This applies to streaming requests too.
+
 ## Using it with Claude Code
 
 `jev-claude` runs `claude` with only `ANTHROPIC_BASE_URL` set. Claude Code keeps using its saved
@@ -179,8 +184,9 @@ free to ignore. Expect better tool picks on large tool lists, not lower cost or 
 
 ## Using it with OpenCode
 
-Tested with stable OpenCode v1.18.31. OpenCode v2 is out of scope: no `previous_response_id`
-chaining, namespaces, or `additional_tools` behavior is assumed.
+The launcher uses the proxy transport. The optional advisory plugin targets OpenCode's
+`@opencode/plugin@2.0.12` API and is an alternative for native providers. In both paths OpenCode
+owns MCP discovery, execution, permissions, and the agent loop. The gateway routes model requests.
 
 **Quick path**
 
@@ -213,7 +219,7 @@ jev-opencode --dashboard      # open the monitoring dashboard in your browser
 | `TYPESAFE_API_KEY` | required | Authorizes the Jev tool-selection call only. Never sent as the LLM upstream credential |
 | `OPENAI_API_KEY` | your key | Your LLM credential. OpenCode resolves `{env:OPENAI_API_KEY}` and the gateway forwards it untouched to the LLM upstream |
 | `JEV_OPENCODE_UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | Where the gateway forwards OpenCode traffic: your LLM provider, not the TypeSafe endpoint |
-| `JEV_OPENCODE_MODEL` | `gpt-5` | Model selected as `jev-gateway/<model>` |
+| `JEV_OPENCODE_MODEL` | see below | Explicit nonempty value selects `jev-gateway/<model>` for both model keys |
 | `JEV_OPENCODE_PORT` | `8791` | Router port for OpenCode |
 
 The gateway forwards the client's `Authorization` header to the LLM upstream. A launcher-spawned
@@ -315,9 +321,56 @@ arguments can remain absent. OpenAI function tools may omit `parameters` to decl
 Malformed schemas, contradictory closed values, ambiguous enum labels, references, composition,
 and other validation keywords delegate argument construction to the LLM without changing the schema.
 
-The launcher sets `OPENCODE_EXPERIMENTAL_NATIVE_LLM=false` and
-`OPENCODE_EXPERIMENTAL_CODE_MODE=false` for the launched process only. Those experimental modes
-are outside the supported path; the stable AI SDK provider above is the supported one.
+The launcher no longer overrides `OPENCODE_EXPERIMENTAL_NATIVE_LLM` or
+`OPENCODE_EXPERIMENTAL_CODE_MODE`. Existing environment values reach the client unchanged;
+this does not make an experimental v1 path a tested native-provider integration.
+
+Model selection follows this order:
+
+| Selection | Behavior |
+| --- | --- |
+| Explicit client `-m provider/model` | Passed through without injected arguments; client CLI selection wins |
+| Nonempty `JEV_OPENCODE_MODEL` | Sets both inline model keys to the requested gateway model |
+| Empty `JEV_OPENCODE_MODEL` | Adds no model override; preserves inherited inline keys and file-based selection |
+| Unset, with either inherited inline model key | Preserves both keys as supplied, including an absent `small_model` |
+| Unset, with neither inline model key | Defaults both keys to `jev-gateway/gpt-5` |
+
+An empty setting does not delete a model from the client's files or inherited inline configuration.
+MCP, permissions, plugins, provider options, model metadata and unrelated providers are preserved.
+Malformed provider objects are rejected before merging. On v2, use `jev-opencode --standalone`
+for an isolated session; explicit `--server` arguments are passed through, not reconfigured remotely.
+
+### Advisory plugin for native v2 providers
+
+Build with `pnpm build`, then configure the compiled plugin directory in the v2 client's settings:
+
+```json
+{
+  "rest": {
+    "plugins": [{
+      "package": "/absolute/path/to/jev-gateway/dist/plugin/jev",
+      "options": { "gatewayUrl": "http://127.0.0.1:8791", "timeoutMs": 1500 }
+    }]
+  }
+}
+```
+
+The package also exports loadable JavaScript at `jev-gateway/plugin`; its type dependencies are
+development-only. Start the decision gateway separately and run plain OpenCode with a native
+provider. The plugin adds a request-local hint to the last user message without changing system
+instructions or persisted messages. It never synthesizes a model response or executes a tool.
+Opaque/provider-executed content bypasses advice; gateway failures leave the request unchanged.
+
+Optional `gatewayApiKey` authenticates only `/router/decide` on a keyed gateway; redirects are
+rejected and this key is never added to provider requests. Keep the key in private client settings.
+`enabled: false` disables hook registration. Do not enable the plugin under `jev-opencode`: the
+launcher marks itself as proxy owner and the plugin rejects that combination. If a native-provider
+alias points at the same gateway origin, its HTTP hook disables proxy routing for that request,
+preventing a second decision. Synthetic direct responses remain exclusive to the proxy path.
+
+The advisory hook covers primary requests and continuations, not auxiliary title or compaction
+requests. Cold first-request MCP readiness, Code Mode, interactive approvals, and desktop CAD
+workflows require separate real-client qualification; unit tests alone do not establish them.
 
 ## Using it with Gemini
 

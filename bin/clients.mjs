@@ -73,39 +73,86 @@ function opencodeUpstream() {
   return process.env.JEV_OPENCODE_UPSTREAM_BASE_URL ?? "https://api.openai.com/v1";
 }
 
-/** Model id selected as `jev-gateway/<model>`; override with JEV_OPENCODE_MODEL. */
-function opencodeModel() {
-  return process.env.JEV_OPENCODE_MODEL ?? "gpt-5";
-}
-
 const OPENCODE_PROVIDER = "jev-gateway";
 
 /**
- * Stable custom-provider config for the launched OpenCode process. Injected through
- * OPENCODE_CONFIG_CONTENT — inline config merges over the user's global/project files, which
- * are never written. `@ai-sdk/openai-compatible` speaks `/v1/chat/completions` off
- * `${origin}/v1`, an endpoint the gateway already routes. `{env:OPENAI_API_KEY}` reuses the
- * user's own OpenAI credential untouched (resolving to empty when unset, like OpenCode's own
- * local-provider examples). The launcher-spawned gateway forwards that client credential
- * untouched: launcher.mjs strips UPSTREAM_API_KEY/ROUTER_API_KEY by design, so no gateway
- * key swap applies here. TYPESAFE_API_KEY is separate — it only authorizes the Jev
- * tool-selection call and is never sent as the LLM upstream credential.
+ * Custom-provider config for the launched OpenCode process, verified against
+ * the pinned binary (`@opencode/cli@2.0.12`, see README).
+ * Injected through OPENCODE_CONFIG_CONTENT — inline config merges over the
+ * user's global/project files, which are never written. The provider entry
+ * uses the shape 2.0.12 honors (`npm: "@ai-sdk/openai-compatible"` with
+ * `options.baseURL/apiKey`); it speaks `/v1/chat/completions` off
+ * `${origin}/v1`, an endpoint the gateway routes (verified with a loopback
+ * stub). `{env:OPENAI_API_KEY}` reuses the user's own OpenAI credential
+ * untouched (resolving to empty when unset, like OpenCode's own
+ * local-provider examples). The launcher-spawned gateway forwards that
+ * client credential untouched: launcher.mjs strips UPSTREAM_API_KEY /
+ * ROUTER_API_KEY by design, so no gateway key swap applies here.
+ * TYPESAFE_API_KEY is separate — it only authorizes the Jev tool-selection
+ * call and is never sent as the LLM upstream credential.
+ *
+ * No capabilities or limits are declared for the gateway model: whatever the
+ * catalog assumes for an undeclared model applies, and the gateway never
+ * presents fallback defaults as detected capabilities.
+ *
+ * Model selection: JEV_OPENCODE_MODEL forces `jev-gateway/<model>`; when it
+ * is unset, an inherited non-gateway model is preserved as-is and only the
+ * provider entry is added. Explicit `opencode -m provider/model` keeps top
+ * priority because the launcher injects no leading args. ARGS_MODEL
+ * (gateway forced-path model) defaults to the request's own model; when set
+ * it is used verbatim and must be valid for the upstream provider.
+ *
+ * Everything else in an inherited OPENCODE_CONFIG_CONTENT (MCP servers,
+ * agents, permissions, plugins, title settings) is preserved key by key.
  */
 function opencodeInlineConfig(origin) {
-  const model = opencodeModel();
-  return {
-    $schema: "https://opencode.ai/config.json",
-    model: `${OPENCODE_PROVIDER}/${model}`,
-    small_model: `${OPENCODE_PROVIDER}/${model}`,
-    provider: {
-      [OPENCODE_PROVIDER]: {
-        npm: "@ai-sdk/openai-compatible",
-        name: "Jev Gateway",
-        options: { baseURL: `${origin}/v1`, apiKey: "{env:OPENAI_API_KEY}" },
-        models: { [model]: { name: `Jev Gateway (${model})` } },
-      },
-    },
+  const forced = process.env.JEV_OPENCODE_MODEL;
+  const inherited = inheritedInlineConfig();
+  const object = (value, path) => {
+    if (value === undefined) return {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`OpenCode ${path} must be an object`);
+    return value;
   };
+  const providers = object(inherited?.provider, "provider");
+  const inheritedId =
+    typeof inherited?.model === "string" && inherited.model.startsWith(`${OPENCODE_PROVIDER}/`)
+      ? inherited.model.slice(OPENCODE_PROVIDER.length + 1)
+      : undefined;
+  const model = forced || inheritedId || "gpt-5";
+  const inheritedEntry = object(providers[OPENCODE_PROVIDER], "provider.jev-gateway");
+  const inheritedOptions = object(inheritedEntry.options, "provider.jev-gateway.options");
+  const models = object(inheritedEntry.models, "provider.jev-gateway.models");
+  const selectedModel = object(models[model], `provider.jev-gateway.models.${model}`);
+  const provider = {
+    ...inheritedEntry,
+    npm: "@ai-sdk/openai-compatible",
+    name: "Jev Gateway",
+    // Extra option keys (e.g. timeout) are preserved; the endpoint always
+    // points at this gateway (otherwise routing silently breaks), and the
+    // credential defaults to the documented mechanism only when absent.
+    options: { ...inheritedOptions, baseURL: `${origin}/v1`, apiKey: inheritedOptions.apiKey ?? "{env:OPENAI_API_KEY}" },
+    models: { ...models, [model]: { name: `Jev Gateway (${model})`, ...selectedModel } },
+  };
+  // Empty means no selection override, not deletion of inline or file-based settings.
+  const select = forced || (forced === undefined && inherited?.model === undefined && inherited?.small_model === undefined);
+  return {
+    ...(inherited ?? {}),
+    $schema: "https://opencode.ai/config.json",
+    ...(select ? { model: `${OPENCODE_PROVIDER}/${model}`, small_model: `${OPENCODE_PROVIDER}/${model}` } : {}),
+    provider: { ...providers, [OPENCODE_PROVIDER]: provider },
+  };
+}
+
+/** Parse an inherited OPENCODE_CONFIG_CONTENT, or undefined when absent/unreadable. */
+function inheritedInlineConfig() {
+  const raw = process.env.OPENCODE_CONFIG_CONTENT;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export const opencode = {
@@ -118,25 +165,33 @@ export const opencode = {
     "JEV_OPENCODE_UPSTREAM_BASE_URL   where OpenCode traffic goes (default https://api.openai.com/v1)\n" +
     "JEV_OPENCODE_MODEL               model selected as jev-gateway/<model> (default gpt-5)",
   // No `args`: the model default comes from the injected config below, so a user `-m provider/model`
-  // keeps its documented top priority and every other `opencode` flag forwards untouched.
-  // The two experimental flags stay off for the launched process only (environment, never a user
-  // file): the stable AI SDK provider path above is the supported one.
+  // keeps its documented top priority and every other `opencode` flag — including `--standalone`
+  // for an isolated gateway session and explicit `--server` for a remote server — forwards
+  // untouched and is never silently ignored. An inherited OPENCODE_CONFIG_CONTENT is merged,
+  // not replaced; obsolete v1 experimental flags are not set.
   env: (origin) => ({
     OPENCODE_CONFIG_CONTENT: JSON.stringify(opencodeInlineConfig(origin)),
-    OPENCODE_EXPERIMENTAL_NATIVE_LLM: "false",
-    OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+    JEV_OPENCODE_ROUTING_OWNER: "proxy",
   }),
   configHelp: (origin) => {
     // No OPENCODE_CONFIG_CONTENT one-liner here: single-quoting raw JSON breaks when a custom
     // model ID contains an apostrophe. The opencode.json file workflow below needs no shell
     // quoting and matches what `jev-opencode --print-config` documents.
     const config = opencodeInlineConfig(origin);
-    const manual = JSON.stringify({ model: config.model, small_model: config.small_model, provider: config.provider }, null, 2);
+    const manual = JSON.stringify(
+      { model: config.model, small_model: config.small_model, provider: config.provider },
+      null,
+      2,
+    );
     return (
       `# Keep the gateway running (jev-opencode --start), then add to opencode.json\n` +
       `# (project root or ~/.config/opencode/opencode.json):\n` +
       `${manual}\n` +
-      `# then select it with: opencode --model ${config.model}`
+      `# then select it with: opencode --model ${config.model}\n` +
+      `# Isolated gateway session (recommended when a shared service is already running):\n` +
+      `#   jev-opencode --standalone\n` +
+      `# Explicit remote server is forwarded untouched:\n` +
+      `#   jev-opencode --server http://127.0.0.1:4096`
     );
   },
 };
@@ -156,4 +211,3 @@ export const gemini = {
     `#   GEMINI_API_BASE=${origin}\n` +
     `#   or endpoint: ${origin}/v1beta\n`,
 };
-
