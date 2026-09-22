@@ -35,6 +35,7 @@ const args = new Set(process.argv.slice(2));
 const KEEP = args.has("--keep");
 
 const work = mkdirTmp();
+console.log(`EVIDENCE ${work}`);
 const harnessIso = { home: join(work, "harness-home"), config: join(work, "harness-config"),
   data: join(work, "harness-data"), cache: join(work, "harness-cache"), state: join(work, "harness-state") };
 for (const directory of Object.values(harnessIso)) mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -163,6 +164,7 @@ if (blocked) {
   for (const name of ALL_CHECKS) report(name, "BLOCKED", blocked);
 }
 if (!blocked) {
+try {
 const ver = spawnSync(bin, ["--version"], { env: hermeticEnv(harnessIso), encoding: "utf8", timeout: 30000 });
 const binaryHash = createHash("sha256").update(readFileSync(bin)).digest("hex");
 if (ver.status !== 0 || ver.stdout?.trim() !== `opencode v${VERSION}` || binaryHash !== CLI_SHA256) {
@@ -252,6 +254,8 @@ let installedGateway = "";
 let installedDigest = "";
 try {
   const packDest = join(work, "pack");
+  const dirty = execFileSync("git", ["status", "--porcelain"], { env: hermeticEnv(harnessIso), cwd: GATEWAY_ROOT, encoding: "utf8", timeout: 10000 });
+  if (dirty.trim()) throw new Error("qualification requires a clean source checkout");
   mkdirSync(packDest, { recursive: true });
   execFileSync("npm", ["pack", "--pack-destination", packDest, "--ignore-scripts"], { env: hermeticEnv(harnessIso), cwd: GATEWAY_ROOT, stdio: "pipe", timeout: 120000 });
   const tgz = readdirSync(packDest).find((f) => f.endsWith(".tgz"));
@@ -642,7 +646,8 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "--auto", "write the file"]);
   try { rmSync(join(project, "toolmode")); } catch {}
   const absent = !existsSync(join(project, "must-not-exist.txt"));
-  const attempted = modelLog().slice(before).some((entry) => entry.servedTool === "write");
+  const attempted = modelLog().slice(before).some((entry) => JSON.parse(entry.body || "{}").messages?.some((message) =>
+    message.tool_calls?.some((call) => call.function?.name === "write")));
   if (r.code === 0 && absent && attempted && allowVerified) report("deny-write-side-effect-free", "PASS", "allow control executed; denied adversarial write left no file");
   else fail("deny-write-side-effect-free", `exit=${r.code} absent=${absent}`);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
@@ -656,7 +661,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   const r = await runOpencode(bin, iso, project, ["run", "--standalone", "write the file"]);
   try { rmSync(join(project, "toolmode")); } catch {}
   const absent = !existsSync(join(project, "must-not-exist-ask.txt"));
-  const attempted = modelLog().slice(before).some((entry) => entry.servedTool === "write");
+  const attempted = modelLog().slice(before).some((entry) => entry.plannedTool === "write");
   if (absent && attempted && r.signal === null && typeof r.code === "number") report("ask-write-safe-default", "PASS", `no TTY approval executed nothing (exit=${r.code})`);
   else fail("ask-write-safe-default", `exit=${r.code} absent=${absent}`);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
@@ -711,7 +716,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   await runOpencode(bin, iso, project, ["run", "--standalone", "credential probe"]);
   killChild(gw2.child); killChild(auth.child);
   const lines = existsSync(authLog) ? readFileSync(authLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-   const good = lines.length > 0 && lines.every((l) => l.expectedSentinel === true);
+  const good = lines.length > 0 && lines.every((l) => l.expectedSentinel === true);
   if (good) report("jev-auth-credential", "PASS", `${lines.length} Jev hits all Bearer jev-sentinel`);
   else fail("jev-auth-credential", `hits=${lines.length}, sentinel equality failed`);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
@@ -725,10 +730,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   const honored = dead.code !== 0;
   if (solo && honored) report("standalone-isolation", "PASS", "private server works; explicit --server honored (fast fail)");
   else fail("standalone-isolation", `solo=${solo} honored=${honored}`);
-  const api = await new Promise((resolve) => {
-    const req = httpRequest({ host: "127.0.0.1", port: GW_PORT, path: "/health", method: "GET" }, (res) => resolve(res.statusCode === 200));
-    req.on("error", () => resolve(false)); req.end();
-  });
+  const api = await httpGet(GW_PORT, "/health").catch(() => 0) === 200;
   // This verifies an explicit address reaches the intended service; the
   // dead --server run above verifies OpenCode honors (not ignores) the flag.
   if (api) report("gateway-health", "PASS", "explicit gateway URL serves /health (not a remote-session test)");
@@ -756,7 +758,11 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
       models: { "acc-model": { name: "Svc", tools: false } } } },
   };
   writeFileSync(join(project, "opencode.json"), JSON.stringify(svcCfg, null, 2));
-  spawnSync(bin, ["service", "start"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
+  const startedService = spawnSync(bin, ["service", "start"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
+  const controlBefore = model2Log().length;
+  const control = await runOpencode(bin, iso, project, ["run", "shared service control"]);
+  const sharedVerified = startedService.status === 0 && control.code === 0
+    && control.out.includes("acceptance-final-answer") && model2Log().length > controlBefore;
   // Let any straggler traffic from earlier scenarios land before measuring.
   await sleep(3000);
   const deadProject = join(work, "deadproject");
@@ -774,7 +780,7 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   spawnSync(bin, ["service", "stop"], { cwd: project, env: hermeticEnv(iso), timeout: 30000 });
   killChild(model2.child);
   writeProject(`http://127.0.0.1:${MODEL_PORT}/v1`);
-  if (r.code !== 0 && svcAfter === svcBefore)
+  if (sharedVerified && r.code !== 0 && r.signal === null && svcAfter === svcBefore)
     report("shared-service-existing", "PASS", `attached dead-config run failed (exit=${r.code}), 0 service-stub hits`);
   else fail("shared-service-existing", `exit=${r.code} serviceStubDelta=${svcAfter - svcBefore}`);
 }
@@ -854,6 +860,9 @@ for (const codemode of [false, true]) for (const denied of [false, true]) {
   else fail("cancellation-no-retry-storm", `signal=${killed.signal} code=${killed.code} before=${before} after=${after} settled=${settled}`);
 }
 
+} catch (error) {
+  fail("harness", String(error.message ?? error).replace(/(Bearer|Basic)\s+\S+/gi, "$1 [redacted]"));
+}
 } // end if (!blocked): binary-driven scenarios require a usable binary
 
 function printSummary() {
