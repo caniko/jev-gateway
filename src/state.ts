@@ -120,7 +120,7 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
   for (let index = groups.length - 1; index >= 0; index--) {
     const group = groups[index]!;
     const prepared = prepare(group.start, limits.maxMessageChars, group.end + 1);
-    const clipped = suffixClipped || prepared.turnClipped.some(Boolean);
+    const clipped: boolean = suffixClipped || prepared.turnClipped.some(Boolean);
     const candidateSize = suffixSize + JSON.stringify(prepared.conversation).length - 2
       + (chunks.length ? 1 : 0);
     const metadata = state([], system, group.start, systemClipped || clipped);
