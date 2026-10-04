@@ -53,12 +53,13 @@ export interface GeminiRequest {
 /** Google Gemini API (`POST /v1beta/models/...:generateContent` and `:streamGenerateContent`). */
 function toInput(req: GeminiRequest, maxMessageChars: number): RouterInput | { skip: string } {
   if (!Array.isArray(req.contents)) return { skip: "no_messages" };
-  if (hasGeminiMultimodal(req.contents)) return { skip: MULTIMODAL_SKIP };
   const config = req.toolConfig?.functionCallingConfig;
   // A caller that lists allowedFunctionNames has already narrowed the choice: Jev picks among those.
   const allowed = config?.allowedFunctionNames?.length ? new Set(config.allowedFunctionNames) : undefined;
   const rawDecls = (req.tools ?? []).flatMap((t) => t.functionDeclarations ?? []).filter((fn) => !allowed || allowed.has(fn.name));
   if (rawDecls.length === 0) return { skip: "no_tools" };
+  if (config?.mode === "NONE") return { skip: "tool_choice_already_decided" };
+  if (hasGeminiMultimodal(req.contents)) return { skip: MULTIMODAL_SKIP };
   // Tools Google runs itself (googleSearch, codeExecution, urlContext) are entries without
   // declarations. Jev sees them so it isn't blind to them, but they can't be forced by name.
   const hosted = (req.tools ?? []).flatMap((tool) => Object.keys(tool).filter((key) => key !== "functionDeclarations"));

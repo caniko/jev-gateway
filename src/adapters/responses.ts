@@ -103,6 +103,10 @@ function toTools(raw: ResponsesTool[]): RouterTool[] {
 function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | { skip: string } {
   // With server-side history the router would be judging a conversation it cannot see.
   if (req.previous_response_id) return { skip: "previous_response_id" };
+  const tools = toTools(declaredTools(req));
+  if (!tools.length) return { skip: "no_tools" };
+  const choice = req.tool_choice ?? "auto";
+  if (choice !== "auto" && choice !== "required") return { skip: "tool_choice_already_decided" };
   if (hasResponsesMultimodal(req.input)) return { skip: MULTIMODAL_SKIP };
   const items = inputItems(req);
   const clip = (value: unknown) => truncate(typeof value === "string" ? value : textOf(value), maxMessageChars);
@@ -142,11 +146,10 @@ function toInput(req: ResponsesRequest, maxMessageChars: number): RouterInput | 
     // Reasoning items (encrypted), item references and hosted-tool traces carry nothing Jev can read.
   }
 
-  const choice = req.tool_choice ?? "auto";
   return {
     system: system.join("\n\n"),
     turns,
-    tools: toTools(declaredTools(req)),
+    tools,
     toolChoice: choice === "auto" || choice === "required" ? choice : "decided",
   };
 }

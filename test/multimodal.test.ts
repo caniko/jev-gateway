@@ -10,7 +10,7 @@ function chatApp() {
   return { app, jev, upstream };
 }
 
-describe("conservative multimodal passthrough", () => {
+describe("latest-interaction multimodal passthrough", () => {
   const parameters = { type: "object", properties: { query: { type: "string" } }, required: ["query"] };
   const functionTool = { type: "function", name: "x", parameters };
   it.each([
@@ -245,8 +245,10 @@ describe("conservative multimodal passthrough", () => {
     expect(malformed.headers.get("x-jev-gateway-mode")).toBe("passthrough");
   });
 
-  it("treats old images in history conservatively (any image bypasses)", async () => {
-    const { app, jev } = chatApp();
+  it("routes when the image is older than the latest text turn", async () => {
+    const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.99 } });
+    const upstream = fakeUpstream();
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
     const res = await app.request("/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -260,8 +262,272 @@ describe("conservative multimodal passthrough", () => {
         tools: [{ type: "function", function: { name: "t", parameters: { type: "object", properties: {} } } }],
       }),
     });
-    // No mechanism guesses the old image was already understood.
+    // The older screenshot keeps main's placeholder; only the latest turn decides the bypass.
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("direct");
+    expect(jev.requests).toHaveLength(1);
+  });
+
+  it.each([
+    ["Responses compaction", "/v1/responses", {
+      model: "m",
+      input: [
+        { type: "compaction", status: "completed" },
+        { role: "user", content: "continue after compaction" },
+      ],
+      tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Responses context compaction", "/v1/responses", {
+      model: "m",
+      input: [
+        { type: "context_compaction", status: "completed" },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Responses tool search output", "/v1/responses", {
+      model: "m",
+      input: [
+        { type: "tool_search_output", call_id: "s", tools: [] },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Responses agent message", "/v1/responses", {
+      model: "m",
+      input: [
+        { type: "agent_message", role: "assistant", content: "delegated" },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Responses MCP call", "/v1/responses", {
+      model: "m",
+      input: [
+        { type: "mcp_call", call_id: "c", name: "shot", arguments: "{}" },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Responses code interpreter call", "/v1/responses", {
+      model: "m",
+      input: [
+        { type: "code_interpreter_call", call_id: "c", status: "completed" },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Messages tool reference", "/v1/messages", {
+      model: "m",
+      messages: [
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "w", content: [{ type: "tool_reference", tool_use_id: "w" }] }] },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ name: "t", input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Messages text-only web fetch result", "/v1/messages", {
+      model: "m",
+      messages: [
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "w", content: [{ type: "web_fetch_tool_result", url: "https://example.test", content: "text" }] }] },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ name: "t", input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Messages unknown block", "/v1/messages", {
+      model: "m",
+      messages: [
+        { role: "user", content: [{ type: "mcp_call", name: "shot" }] },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ name: "t", input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    }],
+    ["Gemini unknown part", "/v1beta/models/gemini-2.0-flash:generateContent", {
+      contents: [
+        { role: "user", parts: [{ somethingNew: { blob: "abc" } }] },
+        { role: "user", parts: [{ text: "continue" }] },
+      ],
+      tools: [{ functionDeclarations: [{ name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }] }],
+    }],
+    ["chat unknown part", "/v1/chat/completions", {
+      model: "m",
+      messages: [
+        { role: "user", content: [{ type: "custom_thing", custom_thing: { blob: "abc" } }] },
+        { role: "user", content: "continue" },
+      ],
+      tools: [{ type: "function", function: { name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } }],
+    }],
+  ])("routes unknown %s instead of bypassing", async (_name, path, body) => {
+    const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.99 } });
+    const upstream = fakeUpstream({ id: "ok" });
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const res = await app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(res.headers.get("x-jev-gateway-reason")).toBeNull();
+    expect(jev.requests).toHaveLength(1);
+    expect(upstream.calls).toHaveLength(1);
+  });
+
+  it("bypasses opaque references even when newer text follows", async () => {
+    const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.99 } });
+    const upstream = fakeUpstream({ id: "ok" });
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        input: [
+          { type: "item_reference", id: "msg_1" },
+          { role: "user", content: "continue in text" },
+        ],
+        tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+      }),
+    });
     expect(res.headers.get("x-jev-gateway-reason")).toBe(MULTIMODAL_SKIP);
     expect(jev.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ["chat image without tools", "/v1/chat/completions", {
+      model: "m",
+      messages: [{ role: "user", content: [{ type: "text", text: "see" }, { type: "image_url", image_url: { url: "http://x/y.png" } }] }],
+    }, "no_tools"],
+    ["chat image with a decided choice", "/v1/chat/completions", {
+      model: "m",
+      messages: [{ role: "user", content: [{ type: "text", text: "see" }, { type: "image_url", image_url: { url: "http://x/y.png" } }] }],
+      tools: [{ type: "function", function: { name: "t", parameters: { type: "object", properties: {} } } }],
+      tool_choice: { type: "function", function: { name: "t" } },
+    }, "tool_choice_already_decided"],
+    ["Responses image without tools", "/v1/responses", {
+      model: "m",
+      input: [{ role: "user", content: [{ type: "input_text", text: "see" }, { type: "input_image", image_url: "http://x/y.png" }] }],
+    }, "no_tools"],
+    ["Gemini image without tools", "/v1beta/models/gemini-2.0-flash:generateContent", {
+      contents: [{ role: "user", parts: [{ text: "see" }, { inlineData: { mimeType: "image/png", data: "AAA" } }] }],
+    }, "no_tools"],
+  ])("keeps %s precedence over the media bypass", async (_name, path, body, reason) => {
+    const jev = fakeJev({});
+    const upstream = fakeUpstream({ id: "ok" });
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const res = await app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("passthrough");
+    expect(res.headers.get("x-jev-gateway-reason")).toBe(reason);
+    expect(jev.requests).toHaveLength(0);
+  });
+
+  it("bypasses a parallel tool batch when one sibling carries media", async () => {
+    const jev = fakeJev({});
+    const upstream = fakeUpstream({ id: "ok" });
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const body = {
+      model: "m",
+      messages: [
+        { role: "user", content: "screenshot both viewports" },
+        { role: "assistant", tool_calls: [
+          { id: "c1", type: "function", function: { name: "shot", arguments: "{}" } },
+          { id: "c2", type: "function", function: { name: "shot", arguments: "{}" } },
+        ] },
+        { role: "tool", tool_call_id: "c1", content: "first viewport: ok" },
+        { role: "tool", tool_call_id: "c2", content: [
+          { type: "text", text: "second viewport:" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAA" } },
+        ] },
+      ],
+      tools: [{ type: "function", function: { name: "shot", parameters: { type: "object", properties: {} } } }],
+    };
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(res.headers.get("x-jev-gateway-reason")).toBe(MULTIMODAL_SKIP);
+    expect(jev.requests).toHaveLength(0);
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0]!.body).toEqual(body);
+  });
+
+  it("ignores trailing bookkeeping around the latest interaction", async () => {
+    // Text plus trailing reasoning still routes.
+    {
+      const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.99 } });
+      const upstream = fakeUpstream({ id: "ok" });
+      const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+      const res = await app.request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          input: [
+            { role: "user", content: "continue" },
+            { type: "reasoning", id: "r", summary: [] },
+          ],
+          tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+        }),
+      });
+      expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+      expect(jev.requests).toHaveLength(1);
+    }
+    // A media batch stays a bypass even with bookkeeping after it.
+    {
+      const jev = fakeJev({});
+      const upstream = fakeUpstream({ id: "ok" });
+      const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+      const res = await app.request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          input: [
+            { type: "function_call", call_id: "c", name: "shot", arguments: "{}" },
+            { type: "computer_call_output", call_id: "c", output: { type: "computer_screenshot", image_url: "https://example.test/image" } },
+            { type: "reasoning", id: "r", summary: [] },
+          ],
+          tools: [{ type: "function", name: "t", parameters: { type: "object", properties: {} } }],
+        }),
+      });
+      expect(res.headers.get("x-jev-gateway-reason")).toBe(MULTIMODAL_SKIP);
+      expect(jev.requests).toHaveLength(0);
+    }
+  });
+
+  it("forwards a latest-media bypass byte for byte, model included", async () => {
+    const jev = fakeJev({});
+    const upstream = fakeUpstream({ id: "ok" });
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const body = {
+      model: "gpt-5",
+      stream: true,
+      input: [{ role: "user", content: [{ type: "input_text", text: "see" }, { type: "input_image", image_url: "http://x/y.png" }] }],
+      tools: [{ type: "function", name: "t", parameters: { type: "object", properties: {} } }],
+    };
+    const res = await app.request("/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("passthrough");
+    expect(res.headers.get("x-jev-gateway-reason")).toBe(MULTIMODAL_SKIP);
+    expect(jev.requests).toHaveLength(0);
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0]!.body).toEqual(body);
+    expect(upstream.calls[0]!.body.model).toBe("gpt-5");
+    expect(upstream.calls[0]!.body.tools).toEqual(body.tools);
+    expect(upstream.calls[0]!.body.stream).toBe(true);
+  });
+
+  it("routes older Gemini media with the newest text turn", async () => {
+    const jev = fakeJev({ tool: { choice: "t" }, needs_tool: { noul: 0.99 } });
+    const upstream = fakeUpstream({ id: "ok" });
+    const app = createApp({ config: testConfig(), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          { role: "user", parts: [{ text: "old" }, { inlineData: { mimeType: "image/png", data: "AAA" } }] },
+          { role: "user", parts: [{ text: "now pure text follow-up" }] },
+        ],
+        tools: [{ functionDeclarations: [{ name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }] }],
+      }),
+    });
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(jev.requests).toHaveLength(1);
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0]!.body.toolConfig.functionCallingConfig).toEqual({ mode: "ANY", allowedFunctionNames: ["t"] });
   });
 });

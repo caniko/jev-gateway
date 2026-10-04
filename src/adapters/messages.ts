@@ -49,8 +49,10 @@ function toTools(raw: MessagesTool[]): RouterTool[] {
 }
 
 function toInput(req: MessagesRequest, maxMessageChars: number): RouterInput | { skip: string } {
-  if (hasMessagesMultimodal(req)) return { skip: MULTIMODAL_SKIP };
   if (!Array.isArray(req.messages)) return { skip: "no_messages" };
+  if (!toTools(req.tools ?? []).length) return { skip: "no_tools" };
+  if (req.tool_choice && !["auto", "any"].includes(req.tool_choice.type)) return { skip: "tool_choice_already_decided" };
+  if (hasMessagesMultimodal(req)) return { skip: MULTIMODAL_SKIP };
   const clip = (value: unknown) => truncate(textOf(value), maxMessageChars);
 
   const toolNameById = new Map<string, string>();

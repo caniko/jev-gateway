@@ -33,15 +33,15 @@ function toTools(rawTools: ToolDef[]): RouterTool[] {
 
 function toInput(req: ChatRequest, maxMessageChars: number): RouterInput | { skip: string } {
   if (!Array.isArray(req.messages)) return { skip: "no_messages" };
-  // Conservative: any image/audio/file part (user screenshots, MCP-returned
-  // screenshots, mixed results, file refs) bypasses before truncation/Jev.
-  // Never downloads URLs or sends payloads to Jev.
-  if (hasChatMultimodal(req.messages)) return { skip: MULTIMODAL_SKIP };
   const rawTools = Array.isArray(req.tools) ? req.tools : [];
   // A function with no name is a body upstream will refuse; it is not ours to guess at.
   if (rawTools.some((tool) => tool.type === "function" ? !tool.function?.name : typeof tool.type !== "string")) {
     return { skip: "malformed_tools" };
   }
+  if (!rawTools.length) return { skip: "no_tools" };
+  const choice = req.tool_choice ?? "auto";
+  if (choice !== "auto" && choice !== "required") return { skip: "tool_choice_already_decided" };
+  if (hasChatMultimodal(req.messages)) return { skip: MULTIMODAL_SKIP };
 
   const toolNameByCallId = new Map<string, string>();
   for (const message of req.messages) {
@@ -74,7 +74,6 @@ function toInput(req: ChatRequest, maxMessageChars: number): RouterInput | { ski
     }
   }
 
-  const choice = req.tool_choice ?? "auto";
   return {
     system: system.join("\n\n"),
     turns,

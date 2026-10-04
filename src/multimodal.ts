@@ -4,77 +4,77 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Retained attachments still matter; only protocol text containers are readable by Jev. */
-function textParts(content: unknown, types: string[]): boolean {
-  if (content == null || typeof content === "string") return false;
-  if (!Array.isArray(content)) return true;
-  return content.some((part: unknown) => !isRecord(part) || typeof part.type !== "string"
-    || !types.includes(part.type) || (typeof part.text !== "string" && typeof part.refusal !== "string")
-    || ["image_url", "input_audio", "file", "file_id"].some((key) => Object.hasOwn(part, key)));
+const MEDIA_TYPES = new Set([
+  "image_url", "input_audio", "file", "input_image", "input_file", "image", "document",
+]);
+const RESULT_TYPES = new Set([
+  "tool_result", "web_search_tool_result", "web_fetch_tool_result", "tool_search_output",
+]);
+
+function isResult(value: unknown): boolean {
+  return isRecord(value) && typeof value.type === "string"
+    && (RESULT_TYPES.has(value.type) || value.type.endsWith("_call_output"));
+}
+
+function hasMedia(content: unknown, depth = 0): boolean {
+  if (depth > 32) return true;
+  if (Array.isArray(content)) return content.some(part => hasMedia(part, depth + 1));
+  if (!isRecord(content)) return false;
+  if (typeof content.type === "string" && MEDIA_TYPES.has(content.type)) return true;
+  if (["image_url", "input_audio", "file", "file_id"].some(key => content[key] != null)) return true;
+  // Follow protocol content containers, never arbitrary tool arguments/results.
+  return isResult(content)
+    && (hasMedia(content.content, depth + 1) || hasMedia(content.output, depth + 1));
+}
+
+function latestBatch(items: unknown[], result: (item: unknown) => boolean): unknown[] {
+  if (!items.length) return [];
+  let start = items.length - 1;
+  if (result(items[start])) {
+    while (start > 0 && result(items[start - 1])) start--;
+  }
+  return items.slice(start);
 }
 
 export function hasChatMultimodal(messages: unknown): boolean {
-  return Array.isArray(messages) && messages.some((message: unknown) => isRecord(message)
-    && (textParts(message.content, ["text", "refusal"]) || message.audio != null));
+  return Array.isArray(messages)
+    && latestBatch(messages, message => isRecord(message) && message.role === "tool")
+      .some(message => isRecord(message) && (hasMedia(message.content) || message.audio != null));
 }
-
-const RESPONSES_TRACES = new Set([
-  "additional_tools", "reasoning", "function_call", "custom_tool_call", "local_shell_call",
-  "web_search_call", "file_search_call", "computer_call",
-]);
 
 export function hasResponsesMultimodal(input: unknown): boolean {
   if (!Array.isArray(input)) return false;
-  return input.some((item: unknown) => {
-    if (!isRecord(item)) return false;
-    if (typeof item.type === "string" && RESPONSES_TRACES.has(item.type)) return false;
-    if (typeof item.type === "string" && item.type.endsWith("_call_output")) {
-      return textParts(item.output, ["input_text", "output_text", "text", "refusal"]);
-    }
-    if (item.type !== undefined && item.type !== "message") return true;
-    return textParts(item.content, ["input_text", "output_text", "text", "refusal"]);
-  });
-}
-
-function messageBlocks(content: unknown, depth = 0): boolean {
-  if (depth > 32) return true;
-  if (content == null || typeof content === "string") return false;
-  if (!Array.isArray(content)) {
-    return !isRecord(content) || content.type !== "web_search_tool_result_error";
-  }
-  return content.some((block: unknown) => {
-    if (!isRecord(block)) return true;
-    if (block.type === "text") return typeof block.text !== "string";
-    if (["tool_use", "server_tool_use", "thinking", "redacted_thinking", "web_search_result",
-      "web_search_tool_result_error"].includes(String(block.type))) return false;
-    if (block.type === "tool_result" || block.type === "web_search_tool_result") {
-      return messageBlocks(block.content, depth + 1);
-    }
-    return true;
-  });
+  // Referenced items are opaque even when they precede a new text-only turn.
+  if (input.some(item => isRecord(item) && item.type === "item_reference")) return true;
+  const interactions = input.filter(item => isRecord(item)
+    && (item.role !== undefined || item.type === "message" || isResult(item)
+      || (typeof item.type === "string" && MEDIA_TYPES.has(item.type))));
+  return latestBatch(interactions, isResult).some(item => isRecord(item)
+    && (hasMedia(item) || hasMedia(item.content) || hasMedia(item.output)));
 }
 
 export function hasMessagesMultimodal(req: { system?: unknown; messages?: unknown }): boolean {
-  return messageBlocks(req.system) || (Array.isArray(req.messages)
-    && req.messages.some((message: unknown) => isRecord(message) && messageBlocks(message.content)));
+  const resultMessage = (message: unknown): boolean => isRecord(message)
+    && Array.isArray(message.content) && message.content.length > 0 && message.content.every(isResult);
+  return hasMedia(req.system) || (Array.isArray(req.messages)
+    && latestBatch(req.messages, resultMessage)
+      .some(message => isRecord(message) && hasMedia(message.content)));
 }
 
-const GEMINI_PART_KEYS = new Set(["text", "functionCall", "functionResponse", "thought", "thoughtSignature"]);
-
-function geminiParts(parts: unknown, depth = 0): boolean {
-  if (depth > 32 || !Array.isArray(parts)) return true;
-  return parts.some((part: unknown) => {
-    if (!isRecord(part) || Object.keys(part).some((key) => !GEMINI_PART_KEYS.has(key))) return true;
-    if (typeof part.text === "string" || isRecord(part.functionCall)) return false;
-    if (isRecord(part.functionResponse)) {
-      // Media lives in functionResponse.parts, not in arbitrary application JSON under response.
-      return part.functionResponse.parts !== undefined && geminiParts(part.functionResponse.parts, depth + 1);
-    }
-    return true;
+function hasGeminiMedia(parts: unknown, depth = 0): boolean {
+  if (depth > 32) return true;
+  return Array.isArray(parts) && parts.some(part => {
+    if (!isRecord(part)) return false;
+    if (part.inlineData != null || part.fileData != null) return true;
+    // Gemini separates response parts from application JSON in response/args.
+    return isRecord(part.functionResponse) && hasGeminiMedia(part.functionResponse.parts, depth + 1);
   });
 }
 
 export function hasGeminiMultimodal(contents: unknown): boolean {
-  return Array.isArray(contents) && contents.some((content: unknown) => isRecord(content)
-    && content.parts !== undefined && geminiParts(content.parts));
+  const resultContent = (content: unknown): boolean => isRecord(content)
+    && Array.isArray(content.parts) && content.parts.length > 0
+    && content.parts.every(part => isRecord(part) && isRecord(part.functionResponse));
+  return Array.isArray(contents) && latestBatch(contents, resultContent)
+    .some(content => isRecord(content) && hasGeminiMedia(content.parts));
 }
