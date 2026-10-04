@@ -292,10 +292,10 @@ describe("latest-interaction multimodal passthrough", () => {
       ],
       tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
     }],
-    ["Responses agent message", "/v1/responses", {
+    ["Responses vendor text trace", "/v1/responses", {
       model: "m",
       input: [
-        { type: "agent_message", role: "assistant", content: "delegated" },
+        { type: "vendor_text_trace", role: "assistant", content: "delegated" },
         { role: "user", content: "continue" },
       ],
       tools: [{ type: "function", name: "t", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
