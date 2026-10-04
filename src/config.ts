@@ -60,6 +60,7 @@ const bool = (env: Env, key: string, fallback: boolean): boolean => {
 
 export function loadConfig(env: Env = process.env): Config {
   const jevProvider = resolveProvider(env);
+  const jevModel = resolveModel(jevProvider, str(env, "JEV_MODEL"));
   const onNone = str(env, "JEV_ON_NONE") ?? "force_none";
   if (onNone !== "force_none" && onNone !== "passthrough") {
     throw new Error(`JEV_ON_NONE must be "force_none" or "passthrough", got "${onNone}"`);
@@ -74,7 +75,7 @@ export function loadConfig(env: Env = process.env): Config {
     jevProvider,
     jevApiKey: str(env, PROVIDERS[jevProvider].keyEnv),
     jevUrl: resolveUrl(jevProvider, env),
-    jevModel: resolveModel(jevProvider, str(env, "JEV_MODEL")),
+    jevModel,
     jevTimeoutMs: num(env, "JEV_TIMEOUT_MS", 4000),
     minConfidence: num(env, "JEV_MIN_CONFIDENCE", 0.7),
     argMinCertainty: num(env, "JEV_ARG_MIN_CERTAINTY", 0.8),

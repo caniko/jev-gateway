@@ -60,10 +60,30 @@ describe("routing context", () => {
     [result("missing", "orphan")],
     [call("a"), call("a"), result("a", "ambiguous")],
     [call("a"), result("a", "first"), result("a", "duplicate")],
-  ])("bypasses genuinely ambiguous or orphaned retained results: %j", (...turns) => {
+  ])("keeps orphaned and reused results routable: %j", (...turns) => {
     const state = buildState({ system: "", turns }, { maxStateChars: 500, maxMessageChars: 4000 });
     expect(JSON.stringify(state).length).toBeLessThanOrEqual(500);
-    expect(state.unrepresentable).toBe(true);
+    expect(state.unrepresentable).toBeUndefined();
+    expect(state.conversation).toEqual(turns);
+  });
+
+  it("matches parallel id-less same-name calls FIFO despite client-generated result IDs", () => {
+    const turns: Turn[] = [
+      { role: "assistant", tool_calls: [{ tool: "read", arguments: "first" }] },
+      { role: "assistant", tool_calls: [{ tool: "read", arguments: "second" }] },
+      { role: "tool_result", tool: "read", call_id: "client-1", content: "A" },
+      { role: "tool_result", tool: "read", call_id: "client-2", content: "B" },
+    ];
+    const state = buildState({ system: "", turns }, { maxStateChars: 2000, maxMessageChars: 4000 });
+    expect(state.unrepresentable).toBeUndefined();
+    expect(state.conversation).toEqual(turns);
+  });
+
+  it("matches reused IDs across exchanges without invalidating earlier groups", () => {
+    const turns = [call("call_0"), result("call_0", "A"), call("call_0"), result("call_0", "B")];
+    const state = buildState({ system: "", turns }, { maxStateChars: 2000, maxMessageChars: 4000 });
+    expect(state.unrepresentable).toBeUndefined();
+    expect(state.conversation).toEqual(turns);
   });
 
   it("keeps observed Gemini IDs without manufacturing absent IDs", () => {

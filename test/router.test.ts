@@ -65,6 +65,29 @@ describe("chatAdapter.toInput + buildState", () => {
 });
 
 describe("POST /v1/chat/completions", () => {
+  it.each([
+    ["no arguments", { type: "object", properties: {} }],
+    ["only constant arguments", { type: "object", properties: { mode: { const: "brief" } }, required: ["mode"] }],
+  ])("forces the tool instead of answering when direct calls are off and it takes %s", async (_name, parameters) => {
+    const { app, post, upstream } = setup(
+      { tool: { choice: "status" }, needs_tool: { noul: 0.99 } },
+      testConfig({ directCalls: false }),
+    );
+    const body = {
+      model: "m", messages: [{ role: "user", content: "Show status" }],
+      tools: [{ type: "function", function: { name: "status", parameters } }],
+    };
+    const res = await post(body);
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0]!.body.tool_choice).toEqual({ type: "function", function: { name: "status" } });
+    const decision = await app.request("/router/decide", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(await decision.json()).toMatchObject({ mode: "forced", tool: "status" });
+    expect(upstream.calls).toHaveLength(1);
+  });
+
   it("answers directly, without the LLM, when Jev can fill every argument", async () => {
     const { post, upstream } = setup(lightsAnswers);
     const res = await post(chat("turn on the kitchen lights"));
@@ -160,6 +183,24 @@ describe("POST /v1/chat/completions", () => {
     const res = await app.request("/v1/chat/completions", { method: "POST", body: JSON.stringify(chat("hi")) });
     expect(res.status).toBe(200);
     expect(res.headers.get("x-jev-gateway-reason")).toContain("jev_error");
+    expect(upstream.calls).toHaveLength(1);
+  });
+
+  // A block page from a proxy in front of Jev (Cloudflare answers 403 with HTML) put newlines into
+  // the reason header, and Headers.set threw after the upstream had already been called.
+  it.each([
+    ["an HTML error page", '403 from TypeSafe: <!DOCTYPE html>\n<!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->'],
+    ["characters a header cannot carry", "503 from TypeSafe: overloaded \u2014 try again"],
+  ])("fails open when a Jev error carries %s", async (_, message) => {
+    const upstream = fakeUpstream();
+    const app = createApp({
+      config: testConfig(),
+      askJev: async () => Promise.reject(new Error(message)),
+      fetch: upstream.fetchImpl,
+    });
+    const res = await app.request("/v1/chat/completions", { method: "POST", body: JSON.stringify(chat("hi")) });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-jev-gateway-reason")).toMatch(/^jev_error: [\x20-\x7e]+$/);
     expect(upstream.calls).toHaveLength(1);
   });
 

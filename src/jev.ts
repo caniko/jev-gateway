@@ -1,14 +1,29 @@
 import type { Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import type { Config } from "./config.js";
 import type { AskJev } from "./decide.js";
-import providers from "./providers.json" with { type: "json" };
+import table from "./providers.json" with { type: "json" };
+
+/** One row of the provider table: where Jev runs, which key gets there, and what to call it. */
+interface Provider {
+  label: string;
+  note: string;
+  keyEnv: string;
+  keyUrl: string;
+  url: string;
+  model: string;
+  /** Only providers that must refuse unlisted ids have a list: the rest tell theirs apart by a slash. */
+  models?: string[];
+  /** A paid model setup can offer only with the user's consent. */
+  paidModel?: string;
+}
 
 /**
- * Where Jev can be reached. TypeSafe's own API, and two gateways that resell it: all three take
+ * Where Jev can be reached. TypeSafe's own API, and gateways that resell it: all of them take
  * the same request body and return the same answers, so one transport serves them. The table is
  * JSON because the launchers' setup wizard (plain .mjs, no build step) reads the same file.
  */
-export type ProviderId = keyof typeof providers;
+const providers = table as Record<keyof typeof table, Provider>;
+export type ProviderId = keyof typeof table;
 export const PROVIDERS = providers;
 export const isProvider = (value: string): value is ProviderId => value in providers;
 
@@ -28,11 +43,16 @@ export function resolveProvider(env: Env): ProviderId {
 /**
  * Model ids live in different namespaces: TypeSafe's have no slash (`jev-latest`), the gateways'
  * do (`typesafe/jev-1.13`). A JEV_MODEL written for one provider is ignored under another, so
- * switching provider never sends an id the new one cannot know.
+ * switching provider never sends an id the new one cannot know. OpenCode's ids have no slash
+ * either, so OpenCode accepts only its listed ids, and a setting written for TypeSafe never
+ * selects its paid model. The others take any id of their shape, so a new model needs no release.
  */
 export function resolveModel(provider: ProviderId, requested: string | undefined): string {
-  const fits = requested && requested.includes("/") === (provider !== "typesafe");
-  return fits ? requested : providers[provider].model;
+  const { model, models } = providers[provider];
+  if (!requested) return model;
+  if (models) return models.includes(requested) ? requested : model;
+  const fits = requested.includes("/") === (provider !== "typesafe") && !providers.opencode.models?.includes(requested);
+  return fits ? requested : model;
 }
 
 /**
@@ -47,6 +67,7 @@ export function resolveUrl(provider: ProviderId, env: Env): string {
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504, 529]);
+const MODEL_GONE = new Set([404, 410]);
 
 /** Some gateways return choice answers without a confidence; the winning probability stands in. */
 function normalize(result: SystemOneResult<Questions>): SystemOneResult<Questions> {
@@ -62,7 +83,10 @@ function normalize(result: SystemOneResult<Questions>): SystemOneResult<Question
 }
 
 /** The one call the gateway makes to Jev, for whichever provider is configured. */
-export function createAskJev(config: Pick<Config, "jevProvider" | "jevApiKey" | "jevUrl" | "jevTimeoutMs">, fetchImpl: typeof fetch = fetch): AskJev {
+export function createAskJev(
+  config: Pick<Config, "jevProvider" | "jevApiKey" | "jevUrl" | "jevTimeoutMs">,
+  fetchImpl: typeof fetch = fetch,
+): AskJev {
   const provider = providers[config.jevProvider];
   if (!config.jevApiKey) {
     throw new Error(`No API key for Jev: set ${provider.keyEnv} (${provider.label}), or run jev-codex --setup.`);
@@ -82,7 +106,10 @@ export function createAskJev(config: Pick<Config, "jevProvider" | "jevApiKey" | 
     });
     if (!response.ok) {
       const detail = (await response.text().catch(() => "")).slice(0, 200);
-      throw Object.assign(new Error(`${response.status} from ${provider.label}: ${detail}`), { status: response.status });
+      const paidHint = config.jevProvider === "opencode" && request.model === provider.model && MODEL_GONE.has(response.status)
+        ? `free model unavailable; set JEV_MODEL=${provider.paidModel} for paid Jev. `
+        : "";
+      throw Object.assign(new Error(`${response.status} from ${provider.label}: ${paidHint}${detail}`), { status: response.status });
     }
     return normalize((await response.json()) as SystemOneResult<Questions>);
   };

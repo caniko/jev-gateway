@@ -1,5 +1,6 @@
 // How each coding agent is pointed at a gateway. Shared by the launchers and the benchmark runner,
 // so a benchmark drives an agent exactly the way `jev-codex`, `jev-claude`, and `jev-opencode` do.
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -108,6 +109,109 @@ function opencodeInlineConfig(origin) {
   };
 }
 
+const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+// Each matches a whole string first, so that `//` in a URL and a comma inside quotes are kept.
+const JSONC_COMMENT = /"(?:\\.|[^"\\])*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g;
+const JSONC_TRAILING_COMMA = /"(?:\\.|[^"\\])*"|,(?=\s*[}\]])/g;
+const keepStrings = (match) => (match.startsWith('"') ? match : "");
+
+/**
+ * OpenCode reads its inline config as JSONC, comments and trailing commas included, so plain
+ * `JSON.parse` would throw away content OpenCode accepts. Undefined when it does not parse.
+ */
+export function parseJsonc(text) {
+  try {
+    return JSON.parse(text.replace(JSONC_COMMENT, keepStrings).replace(JSONC_TRAILING_COMMA, keepStrings));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * OPENCODE_CONFIG_CONTENT is one variable, and the user may already be using it. Theirs is kept
+ * and the gateway's is laid over it: the default models and the `jev-gateway` provider are the
+ * launcher's to set, everything else (agents, permissions, other providers) stays as they wrote
+ * it. Content that is not a JSON object cannot be merged, so it is dropped, and the notices say so.
+ */
+export function opencodeConfigContent(origin, inherited) {
+  const ours = opencodeInlineConfig(origin);
+  const theirs = inherited?.trim() ? parseJsonc(inherited) : undefined;
+  if (!isObject(theirs)) return JSON.stringify(ours);
+  const provider = { ...(isObject(theirs.provider) ? theirs.provider : {}), ...ours.provider };
+  return JSON.stringify({ ...theirs, ...ours, provider });
+}
+
+const providerOf = (model) => (typeof model === "string" && model.includes("/") ? model.slice(0, model.indexOf("/")) : undefined);
+
+/** The value of `-m` / `--model` among the arguments meant for OpenCode, if there is one. */
+function modelFlag(argv) {
+  for (const [index, arg] of argv.entries()) {
+    if (arg === "--") return undefined;
+    if (arg === "-m" || arg === "--model") return argv[index + 1];
+    if (arg.startsWith("--model=")) return arg.slice("--model=".length);
+    if (/^-m./.test(arg)) return arg.slice(2).replace(/^=/, "");
+  }
+  return undefined;
+}
+
+/**
+ * What in this OpenCode session will not go through the gateway, as lines for the user.
+ *
+ * The launcher sets the *default* model to one served by the gateway. OpenCode lets an agent name
+ * a model of its own (`agent.<name>.model`, or `model:` in an agent's markdown file), and `-m`
+ * outranks everything: either one selects another provider, whose traffic goes straight to that
+ * provider. Those are the user's choices and are left alone, but a session that quietly skips Jev
+ * looks exactly like one where Jev had nothing to decide, so they are said out loud.
+ *
+ * `resolved` is what `opencode debug config` prints: OpenCode's own merge of every config source,
+ * which is the only reliable way to know what an agent will use. A provider counts as covered by
+ * where it sends requests, not by its name, so one the user pointed at the gateway (`origin`)
+ * themselves is not reported.
+ */
+export function opencodeOutsideGateway(resolved, argv = [], origin) {
+  const providers = isObject(resolved) && isObject(resolved.provider) ? resolved.provider : {};
+  const covered = (model) => {
+    const id = providerOf(model);
+    if (id === OPENCODE_PROVIDER) return true;
+    const baseURL = id === undefined ? undefined : providers[id]?.options?.baseURL;
+    return origin !== undefined && typeof baseURL === "string" && (baseURL === origin || baseURL.startsWith(`${origin}/`));
+  };
+  const outside = [];
+  const flag = modelFlag(argv);
+  if (flag !== undefined && !covered(flag)) outside.push(`this session (--model ${flag})`);
+  if (isObject(resolved)) {
+    if (!covered(resolved.model)) outside.push(`the default model (${resolved.model ?? "none"})`);
+    for (const [name, agent] of Object.entries(isObject(resolved.agent) ? resolved.agent : {})) {
+      if (!isObject(agent) || agent.disable === true || typeof agent.model !== "string") continue;
+      if (!covered(agent.model)) outside.push(`agent "${name}" (${agent.model})`);
+    }
+  }
+  if (outside.length === 0) return [];
+  return [
+    "these go straight to their provider, not through the gateway, because they name a model of their own:",
+    ...outside.map((line) => `  - ${line}`),
+    `Jev only sees requests to ${OPENCODE_PROVIDER}/* models. Agents without a model of their own use the default and are covered.`,
+  ];
+}
+
+/** Ask OpenCode how it resolves its configuration with ours laid over it. Undefined when it cannot say. */
+function opencodeResolvedConfig(env) {
+  return new Promise((resolve) => {
+    execFile("opencode", ["debug", "config"], { env, timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      if (error) return resolve(undefined);
+      // Log lines may come first, and may hold braces of their own: the JSON starts on a line of its own.
+      const start = stdout.search(/^\{/m);
+      if (start < 0) return resolve(undefined);
+      try {
+        resolve(JSON.parse(stdout.slice(start)));
+      } catch {
+        resolve(undefined);
+      }
+    });
+  });
+}
+
 export const opencode = {
   name: "jev-opencode",
   client: "opencode",
@@ -116,16 +220,30 @@ export const opencode = {
   upstream: opencodeUpstream,
   upstreamHelp:
     "JEV_OPENCODE_UPSTREAM_BASE_URL   where OpenCode traffic goes (default https://api.openai.com/v1)\n" +
-    "JEV_OPENCODE_MODEL               model selected as jev-gateway/<model> (default gpt-5)",
+    "  JEV_OPENCODE_MODEL               model selected as jev-gateway/<model> (default gpt-5)\n" +
+    "  JEV_OPENCODE_CHECK               off skips listing the agents that bypass the gateway (saves about a second)",
   // No `args`: the model default comes from the injected config below, so a user `-m provider/model`
   // keeps its documented top priority and every other `opencode` flag forwards untouched.
   // The two experimental flags stay off for the launched process only (environment, never a user
   // file): the stable AI SDK provider path above is the supported one.
-  env: (origin) => ({
-    OPENCODE_CONFIG_CONTENT: JSON.stringify(opencodeInlineConfig(origin)),
+  env: (origin, inherited = process.env) => ({
+    OPENCODE_CONFIG_CONTENT: opencodeConfigContent(origin, inherited.OPENCODE_CONFIG_CONTENT),
     OPENCODE_EXPERIMENTAL_NATIVE_LLM: "false",
     OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
   }),
+  // Asking OpenCode costs about a second, which is OpenCode loading its configuration.
+  // JEV_OPENCODE_CHECK=off skips that part; an inline config that had to be dropped is always said.
+  notices: async (origin, argv, inherited = process.env) => {
+    const content = inherited.OPENCODE_CONFIG_CONTENT;
+    const dropped = content?.trim() && !isObject(parseJsonc(content))
+      ? ["OPENCODE_CONFIG_CONTENT in your environment is not a JSON object, so this session gets only the gateway's settings from it."]
+      : [];
+    if (inherited.JEV_OPENCODE_CHECK === "off") return dropped;
+    const resolved = await opencodeResolvedConfig({ ...inherited, ...opencode.env(origin, inherited) });
+    const outside = opencodeOutsideGateway(resolved, argv, origin);
+    // The launcher prefixes only the first line with its name; a second notice needs its own.
+    return dropped.length && outside.length ? [...dropped, `${opencode.name}: ${outside[0]}`, ...outside.slice(1)] : [...dropped, ...outside];
+  },
   configHelp: (origin) => {
     // No OPENCODE_CONFIG_CONTENT one-liner here: single-quoting raw JSON breaks when a custom
     // model ID contains an apostrophe. The opencode.json file workflow below needs no shell
@@ -140,6 +258,72 @@ export const opencode = {
     );
   },
 };
+export const devin = {
+  name: "jev-devin",
+  client: "devin",
+  portEnv: "JEV_DEVIN_PORT",
+  defaultPort: 8792,
+  upstream: () => process.env.JEV_DEVIN_UPSTREAM_BASE_URL ?? "https://server.codeium.com",
+  upstreamHelp: "JEV_DEVIN_UPSTREAM_BASE_URL   where Devin traffic goes (default https://server.codeium.com)",
+  // The variable's name is a leftover compiled into the devin binary itself; it is the only
+  // knob that redirects the exa protocol. DEVIN_API_URL points at api.devin.ai instead.
+  env: (origin) => ({ WINDSURF_API_SERVER_URL: origin }),
+  configHelp: (origin) =>
+    `# Keep the gateway running (jev-devin --start), then:\n` +
+    `#   WINDSURF_API_SERVER_URL=${origin} devin\n`,
+};
+
+function kiloUpstream() {
+  return process.env.JEV_KILO_UPSTREAM_BASE_URL ?? "https://api.kilo.ai/api/openrouter";
+}
+
+function kiloModel() {
+  return process.env.JEV_KILO_MODEL ?? "kilo-auto/free";
+}
+
+// Kilo's built-in `kilo` provider cannot be reused: it appends `/openrouter/` to any base URL, which
+// misses the routed endpoint. So Kilo gets a provider of its own, and the user's key reaches it
+// through `{env:KILO_API_KEY}`, which Kilo expands itself, so the key never enters the config.
+function kiloInlineConfig(origin) {
+  const model = kiloModel();
+  return {
+    $schema: "https://kilo.ai/config.json",
+    model: `${OPENCODE_PROVIDER}/${model}`,
+    small_model: `${OPENCODE_PROVIDER}/${model}`,
+    provider: {
+      [OPENCODE_PROVIDER]: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Jev Gateway",
+        options: { baseURL: `${origin}/v1`, apiKey: "{env:KILO_API_KEY}" },
+        models: { [model]: { name: `Jev Gateway (${model})` } },
+      },
+    },
+  };
+}
+
+export const kilo = {
+  name: "jev-kilo",
+  client: "kilo",
+  portEnv: "JEV_KILO_PORT",
+  defaultPort: 8793,
+  upstream: kiloUpstream,
+  upstreamHelp:
+    "JEV_KILO_UPSTREAM_BASE_URL   where Kilo traffic goes (default https://api.kilo.ai/api/openrouter)\n" +
+    "JEV_KILO_MODEL               model selected as jev-gateway/<model> (default kilo-auto/free)\n" +
+    "KILO_API_KEY                 your Kilo key, forwarded untouched; unset means free models only",
+  env: (origin) => ({ KILO_CONFIG_CONTENT: JSON.stringify(kiloInlineConfig(origin)) }),
+  configHelp: (origin) => {
+    const config = kiloInlineConfig(origin);
+    const manual = JSON.stringify({ model: config.model, small_model: config.small_model, provider: config.provider }, null, 2);
+    return (
+      `# Keep the gateway running (jev-kilo --start), then add to kilo.jsonc\n` +
+      `# (project root or ~/.config/kilo/kilo.jsonc):\n` +
+      `${manual}\n` +
+      `# then select it with: kilo --model ${config.model}`
+    );
+  },
+};
+
 export const gemini = {
   name: "jev-gemini",
   client: "gemini",

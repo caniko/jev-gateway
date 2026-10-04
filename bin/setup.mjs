@@ -43,17 +43,23 @@ export function saveEnv(file, values) {
 /** One real question to Jev: the only way to know a key works before an agent depends on it. */
 export async function validateKey(provider, key, fetchImpl = fetch) {
   const startedAt = Date.now();
-  try {
-    const response = await fetchImpl(provider.url, {
+  const ask = (model) =>
+    fetchImpl(provider.url, {
       method: "POST",
       headers: { authorization: `Bearer ${key}`, "content-type": "application/json", "x-title": "jev-gateway" },
       body: JSON.stringify({
-        model: provider.model,
+        model,
         state: "jev-gateway setup check",
         questions: { ok: { type: "noul", instructions: "Is this a setup check?" } },
       }),
       signal: AbortSignal.timeout(15_000),
     });
+  try {
+    const response = await ask(provider.model);
+    // A paid key check may be billed, so setup asks before it makes that call.
+    if (!response.ok && provider.paidModel && (response.status === 404 || response.status === 410)) {
+      return { ok: false, freeUnavailable: true, refused: false, reason: `${response.status} free model unavailable` };
+    }
     if (response.ok) return { ok: true, ms: Date.now() - startedAt };
     const detail = (await response.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 160);
     return { ok: false, refused: response.status === 401 || response.status === 403, reason: `${response.status} ${detail}`.trim() };
@@ -89,7 +95,18 @@ export async function runSetup({ name, providers, envFile, io, validate = valida
       return undefined;
     }
     io.print("Checking the key with Jev…");
-    const result = await validate(provider, key);
+    let result = await validate(provider, key);
+    let model = provider.model;
+    if (result.freeUnavailable && provider.paidModel) {
+      const paid = (await io.ask(`Use paid ${provider.paidModel} for Jev? Its key check may be billed. [y/N]: `)).trim().toLowerCase();
+      if (paid === "y" || paid === "yes") {
+        model = provider.paidModel;
+        result = await validate({ ...provider, model, paidModel: undefined }, key);
+        if (result.ok) result = { ...result, paidModel: model };
+      } else {
+        io.print("The gateway will pass requests to the LLM while the free Jev model is unavailable.");
+      }
+    }
     if (!result.ok && result.refused) {
       io.print(`${provider.label} refused that key (${result.reason}).${attempt < 3 ? " Try again, or press Enter to stop." : ""}`);
       continue;
@@ -98,10 +115,13 @@ export async function runSetup({ name, providers, envFile, io, validate = valida
       io.print(`Could not check the key: ${result.reason}`);
       const keep = (await io.ask("Save it anyway? [y/N]: ")).trim().toLowerCase();
       if (keep !== "y" && keep !== "yes") return undefined;
+    } else if (result.paidModel) {
+      io.print(`The key works with paid ${result.paidModel}; the free model is unavailable.`);
     } else {
       io.print(`The key works (Jev answered in ${result.ms} ms).`);
     }
     const values = { JEV_PROVIDER: id, [provider.keyEnv]: key };
+    if (provider.paidModel) values.JEV_MODEL = model;
     save(envFile, values);
     io.print(`Saved to ${envFile}. Change it any time with \`${name} --setup\`.\n`);
     return values;

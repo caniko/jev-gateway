@@ -97,6 +97,7 @@ function toInput(req: MessagesRequest, maxMessageChars: number): RouterInput | {
     tools: toTools(Array.isArray(req.tools) ? req.tools : []),
     toolChoice: choice === "auto" ? "auto" : choice === "any" ? "required" : "decided",
     steer: thinking || cached ? "hint" : "tool_choice",
+    thinking,
   };
 }
 

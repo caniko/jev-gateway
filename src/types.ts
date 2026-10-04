@@ -92,6 +92,11 @@ export interface RouterInput {
    * the conversation instead, for requests where rewriting tool_choice is rejected or too costly.
    */
   steer?: "tool_choice" | "hint";
+  /**
+   * The client runs with extended thinking. A tool call the gateway builds itself (`direct`) has no
+   * thinking block, and the provider rejects a thinking conversation that replays it.
+   */
+  thinking?: boolean;
 }
 
 /** A tool call Jev produced in full, to be rendered in the client's wire format. */

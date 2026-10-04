@@ -37,40 +37,39 @@ function record(value: Json | undefined): value is Turn {
 }
 
 /** Merge dependency spans, so call A, call B, result A, result B remain one ordered group. */
-function interactionGroups(turns: Turn[]): { start: number; end: number; ambiguous: boolean }[] {
+function interactionGroups(turns: Turn[]): { start: number; end: number }[] {
   const ends = turns.map((_turn, index) => index);
-  const invalid = new Set<number>();
   const calls: { index: number; id: Json | undefined; name: Json | undefined; done: boolean }[] = [];
   const byId = new Map<string, typeof calls>();
   turns.forEach((turn, index) => {
     for (const call of Array.isArray(turn.tool_calls) ? turn.tool_calls : []) {
-      if (!record(call)) { invalid.add(index); continue; }
+      if (!record(call)) continue;
       const entry = { index, id: call.call_id, name: call.tool, done: false };
       calls.push(entry);
       if (typeof entry.id === "string") {
         const prior = byId.get(entry.id) ?? [];
-        if (prior.length) { invalid.add(index); prior.forEach((item) => invalid.add(item.index)); }
         prior.push(entry);
         byId.set(entry.id, prior);
       }
     }
     if (turn.role !== "tool_result") return;
-    const candidates = typeof turn.call_id === "string" ? byId.get(turn.call_id) ?? []
-      : calls.filter((call) => call.id === undefined && !call.done && call.name === turn.tool);
-    const call = candidates[0];
-    if (candidates.length !== 1 || !call || call.done) { invalid.add(index); return; }
+    // Prefer an outstanding wire ID, then use the oldest pending name match.
+    // Gemini clients can invent IDs, omit them, or reuse them next exchange.
+    const exact = typeof turn.call_id === "string"
+      ? byId.get(turn.call_id)?.find(call => !call.done) : undefined;
+    const call = exact ?? calls.find(call => !call.done && call.name === turn.tool);
+    // Standalone results remain useful routing evidence in their own group.
+    if (!call) return;
     call.done = true;
     ends[call.index] = Math.max(ends[call.index]!, index);
   });
   const groups = [];
   for (let start = 0; start < turns.length;) {
     let end = ends[start]!;
-    let ambiguous = false;
     for (let index = start; index <= end; index++) {
       end = Math.max(end, ends[index]!);
-      ambiguous ||= invalid.has(index);
     }
-    groups.push({ start, end, ambiguous });
+    groups.push({ start, end });
     start = end + 1;
   }
   return groups;
@@ -102,7 +101,6 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
   // ponytail: exact suffix serialization is quadratic in retained turns; cache group sizes if profiling warrants it.
   for (let index = groups.length - 1; index >= 0; index--) {
     const group = groups[index]!;
-    if (group.ambiguous) return kept ?? unusable;
     const candidate = render(group.start, limits.maxMessageChars);
     if (JSON.stringify(candidate).length <= limits.maxStateChars) { kept = candidate; continue; }
     if (kept) break;

@@ -156,6 +156,16 @@ describe("POST /v1/messages", () => {
     expect(events[4].delta.stop_reason).toBe("tool_use");
   });
 
+  it("never answers a thinking conversation by itself: the LLM makes the call, steered by a hint", async () => {
+    const { post, upstream } = setup({ tool: { choice: "ExitPlanMode" }, needs_tool: { noul: 0.9 } });
+    const res = await post(claudeRequest(asClaudeCode));
+
+    expect(upstream.calls).toHaveLength(1);
+    expect(res.headers.get("x-jev-gateway-mode")).toBe("hint");
+    expect(res.headers.get("x-jev-gateway-tool")).toBe("ExitPlanMode");
+    expect(upstream.calls[0]!.body.messages.at(-1).content.at(-1).text).toContain('"ExitPlanMode"');
+  });
+
   it("maps tool_choice any to a required tool and leaves named choices alone", async () => {
     const required = setup(bash);
     await required.post(claudeRequest({ tool_choice: { type: "any" } }));

@@ -26,6 +26,8 @@ const ENV_FILES = [...(FROM_SOURCE && !process.env.JEV_SKIP_PROJECT_ENV ? [join(
  * @param {string} spec.upstreamHelp          help text describing the upstream default
  * @param {(origin: string) => string[]} [spec.args]   extra leading arguments for the client
  * @param {(origin: string) => Record<string, string>} [spec.env]  extra environment for the client
+ * @param {(origin: string, argv: string[]) => Promise<string[]>} [spec.notices]  what the user should
+ *   know before this session starts, e.g. traffic that will not reach the gateway; never throws
  * @param {(origin: string) => string} spec.configHelp  how to wire the client up permanently
  */
 /** Load the key for Jev and friends; real environment variables win over both files. */
@@ -44,6 +46,11 @@ export async function runLauncher(spec) {
   const logFile = join(STATE_DIR, `${spec.client}.log`);
   const pidFile = join(STATE_DIR, `${spec.client}.pid`);
 
+  const providers = loadProviders(ROOT);
+  const providerLabels = Object.values(providers).map((p) => p.label).join(", ");
+  const providerKeys = Object.values(providers).map((p) => p.keyEnv);
+  const keysList = `${providerKeys.slice(0, -1).join(", ")} or ${providerKeys.at(-1)}`;
+
   const help = `${spec.name}: ${spec.client} with tool selection routed through Jev
 
   ${spec.name} [${spec.client} args]    start the gateway if needed, then run ${spec.client} through it
@@ -53,13 +60,13 @@ export async function runLauncher(spec) {
   ${spec.name} --logs             follow routing decisions live (use a second terminal)
   ${spec.name} --start            start the gateway without opening ${spec.client}
   ${spec.name} --stop             stop the background gateway
-  ${spec.name} --setup            choose where to reach Jev (TypeSafe, OpenRouter, Vercel) and set the key
+  ${spec.name} --setup            choose where to reach Jev (${providerLabels}) and set the key
   ${spec.name} --print-config     how to point plain \`${spec.client}\` at the gateway permanently
   ${spec.name} --gateway-help     this text (\`--help\` shows ${spec.client}'s own help)
 
 Environment (or ${ENV_FILES.at(-1)}):
   A key for Jev is required. ${spec.name} asks for it the first time and saves it; it can be
-  TYPESAFE_API_KEY, OPENROUTER_API_KEY or AI_GATEWAY_API_KEY (JEV_PROVIDER picks when several are set)
+  ${keysList} (JEV_PROVIDER picks when several are set)
   ${spec.portEnv}   router port for ${spec.client} (default ${spec.defaultPort})
   ${spec.upstreamHelp}
   BROWSER            command --dashboard opens the page with; "none" only prints the URL
@@ -74,10 +81,19 @@ Environment (or ${ENV_FILES.at(-1)}):
     }
   };
 
+  /** A notice is a courtesy: whatever goes wrong while working it out, the session still starts. */
+  const notices = async (argv) => {
+    try {
+      const lines = (await spec.notices?.(origin, argv)) ?? [];
+      return lines.map((line, index) => (index === 0 ? `${spec.name}: ${line}` : line));
+    } catch {
+      return [];
+    }
+  };
+
   const tailLog = (lines = 15) =>
     existsSync(logFile) ? readFileSync(logFile, "utf8").trimEnd().split("\n").slice(-lines).join("\n") : "";
 
-  const providers = loadProviders(ROOT);
   const envFile = ENV_FILES.at(-1);
 
   /** Ask for the key and adopt the answer in this process, so the gateway it starts inherits it. */
@@ -223,7 +239,9 @@ Environment (or ${ENV_FILES.at(-1)}):
     console.log(running ? `${spec.name}: router up on ${origin} → ${running.upstream}${via}` : `${spec.name}: router is not running`);
     const configured = configuredProvider(process.env, providers);
     console.log(configured ? `key: ${providers[configured].label} (${providers[configured].keyEnv})` : `key: none yet, run \`${spec.name} --setup\``);
-    return console.log(`logs: ${logFile}`);
+    console.log(`logs: ${logFile}`);
+    for (const line of await notices(process.argv.slice(3))) console.log(line);
+    return;
   }
   if (flag === "--dashboard") {
     await ensureRouter();
@@ -247,7 +265,10 @@ Environment (or ${ENV_FILES.at(-1)}):
     return spawn("tail", ["-n", "30", "-f", logFile], { stdio: "inherit" });
   }
 
-  await ensureRouter();
+  // Asked while the gateway starts, so the two waits overlap. Printed before the client takes over
+  // the terminal; `--status` shows the same lines at any time.
+  const [, warnings] = await Promise.all([ensureRouter(), notices(process.argv.slice(2))]);
+  for (const line of warnings) console.error(line);
   const child = spawn(spec.client, [...(spec.args?.(origin) ?? []), ...process.argv.slice(2)], {
     stdio: "inherit",
     env: { ...process.env, ...spec.env?.(origin) },
