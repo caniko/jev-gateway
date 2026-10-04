@@ -56,6 +56,36 @@ describe("routing context", () => {
     expect(state.unrepresentable).toBeUndefined();
   });
 
+  it("selects the complete suffix at the exact escaped JSON budget", () => {
+    const turns: Turn[] = Array.from({ length: 30 }, (_, index) => ({
+      role: "user", text: `${index}: ${'\\"😀'.repeat(8)}`,
+    }));
+    const input = { system: 'Keep "quotes" and 😀', turns };
+    const originalText = turns[17]!.text;
+    const expected = {
+      assistant_instructions: input.system,
+      earlier_turns_omitted: 17,
+      conversation: turns.slice(17),
+    };
+    const budget = JSON.stringify(expected).length;
+    const state = buildState(input, { maxStateChars: budget, maxMessageChars: 4000 });
+    expect(state).toEqual(expected);
+    expect(JSON.stringify(state).length).toBe(budget);
+    expect(buildState(input, { maxStateChars: budget - 1, maxMessageChars: 4000 })).toEqual({
+      ...expected, earlier_turns_omitted: 18, conversation: turns.slice(18),
+    });
+    (state.conversation as Turn[])[0]!.text = "changed output";
+    expect(input.turns[17]!.text).toBe(originalText);
+  });
+
+  it("omits clipping metadata when only discarded turns were clipped", () => {
+    const expected = { earlier_turns_omitted: 1, conversation: [{ role: "user", text: "continue" }] };
+    const state = buildState({ system: "", turns: [
+      { role: "user", text: "old ".repeat(100) }, { role: "user", text: "continue" },
+    ] }, { maxStateChars: JSON.stringify(expected).length, maxMessageChars: 20 });
+    expect(state).toEqual(expected);
+  });
+
   it.each([
     [result("missing", "orphan")],
     [call("a"), call("a"), result("a", "ambiguous")],

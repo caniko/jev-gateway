@@ -79,7 +79,8 @@ function interactionGroups(turns: Turn[]): { start: number; end: number }[] {
 export function buildState(input: Pick<RouterInput, "system" | "turns">, limits: Limits): { [key: string]: Json } {
   const groups = interactionGroups(input.turns);
   const unusable = { conversation: [], unrepresentable: true };
-  const render = (start: number, cap: number): { [key: string]: Json } => {
+  if (!groups.length) return unusable;
+  const prepare = (start: number, cap: number, end = input.turns.length) => {
     let clipped = false;
     const clip = (text: string): string => {
       const result = truncate(text, cap);
@@ -87,23 +88,50 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
       return result;
     };
     const system = clip(input.system);
-    const conversation = structuredClone(input.turns.slice(start));
-    for (const turn of conversation) {
+    const systemClipped = clipped;
+    const conversation = structuredClone(input.turns.slice(start, end));
+    const turnClipped = conversation.map(turn => {
+      clipped = false;
       for (const key of ["text", "content"]) if (typeof turn[key] === "string") turn[key] = clip(turn[key]);
       for (const call of Array.isArray(turn.tool_calls) ? turn.tool_calls : []) {
         if (record(call) && typeof call.arguments === "string") call.arguments = clip(call.arguments);
       }
-    }
+      return clipped;
+    });
+    return { system, systemClipped, conversation, turnClipped };
+  };
+  const state = (conversation: Turn[], system: string, start: number, clipped: boolean): { [key: string]: Json } => {
     return { ...(system ? { assistant_instructions: system } : {}),
       ...(start ? { earlier_turns_omitted: start } : {}), ...(clipped ? { clipped: true } : {}), conversation };
   };
-  let kept: { [key: string]: Json } | undefined;
-  // ponytail: exact suffix serialization is quadratic in retained turns; cache group sizes if profiling warrants it.
+  const render = (start: number, cap: number): { [key: string]: Json } => {
+    const prepared = prepare(start, cap);
+    return state(prepared.conversation, prepared.system, start,
+      prepared.systemClipped || prepared.turnClipped.some(Boolean));
+  };
+  const system = truncate(input.system, limits.maxMessageChars);
+  const systemClipped = system !== input.system;
+  const chunks: Turn[][] = [];
+  let suffixSize = 0;
+  let suffixClipped = false;
+  let keptStart: number | undefined;
+  // Serialize each considered group once, including its array commas. Stop
+  // before processing older history that cannot join the retained suffix.
   for (let index = groups.length - 1; index >= 0; index--) {
     const group = groups[index]!;
-    const candidate = render(group.start, limits.maxMessageChars);
-    if (JSON.stringify(candidate).length <= limits.maxStateChars) { kept = candidate; continue; }
-    if (kept) break;
+    const prepared = prepare(group.start, limits.maxMessageChars, group.end + 1);
+    const clipped = suffixClipped || prepared.turnClipped.some(Boolean);
+    const candidateSize = suffixSize + JSON.stringify(prepared.conversation).length - 2
+      + (chunks.length ? 1 : 0);
+    const metadata = state([], system, group.start, systemClipped || clipped);
+    if (JSON.stringify(metadata).length + candidateSize <= limits.maxStateChars) {
+      chunks.push(prepared.conversation);
+      keptStart = group.start;
+      suffixSize = candidateSize;
+      suffixClipped = clipped;
+      continue;
+    }
+    if (keptStart !== undefined) break;
     let low = 0;
     let high = limits.maxMessageChars;
     let smallest = render(group.start, 0);
@@ -116,5 +144,6 @@ export function buildState(input: Pick<RouterInput, "system" | "turns">, limits:
     }
     return smallest;
   }
-  return kept ?? unusable;
+  return keptStart === undefined ? unusable : state(chunks.reverse().flat(), system,
+    keptStart, systemClipped || suffixClipped);
 }
