@@ -387,6 +387,10 @@ injected through `KILO_CONFIG_CONTENT`. Nothing in `~/.config/kilo` is written, 
 flag (including `-m`) forwards untouched. Kilo speaks `POST /v1/chat/completions` to the gateway,
 with the same function tools OpenCode sends.
 
+Existing `KILO_CONFIG_CONTENT` settings are kept; JSONC comments and trailing commas are accepted.
+Gateway defaults and the `jev-gateway` provider are overlaid without removing other settings or
+providers. If the inherited content is not a JSON object, the launcher reports that it could not keep it.
+
 The gateway forwards to the Kilo Gateway (`https://api.kilo.ai/api/openrouter`), the backend of
 Kilo's own `kilo` provider. That provider cannot be pointed at the gateway itself: it appends
 `/openrouter/` to any base URL, so its requests would miss the routed endpoint. The launcher adds a

@@ -9,7 +9,6 @@ import { fakeJev, fakeUpstream, testConfig } from "./helpers.js";
 const clientsModule: string = "../bin/clients.mjs";
 const clients = await import(clientsModule);
 
-
 const globTool = {
   type: "function",
   function: {
@@ -233,6 +232,11 @@ describe("jev-kilo spec", () => {
     expect(help).toContain("--model jev-gateway/kilo-auto/free");
     const parsed = JSON.parse(help.slice(help.indexOf("{"), help.lastIndexOf("}") + 1)) as any;
     expect(parsed.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
+  });
+
+  it("reports invalid inherited inline settings instead of dropping them silently", async () => {
+    expect((await clients.kilo.notices(origin, [], { KILO_CONFIG_CONTENT: "{ invalid" })).join("\n")).toContain("KILO_CONFIG_CONTENT");
+    expect(await clients.kilo.notices(origin, [], { KILO_CONFIG_CONTENT: '{ "permission": {}, }' })).toEqual([]);
   });
 });
 
