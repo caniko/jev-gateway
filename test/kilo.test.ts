@@ -146,7 +146,7 @@ const others = [clients.codex, clients.claude, clients.opencode, clients.gemini]
 const origin = "http://127.0.0.1:8793";
 const launcherBin = fileURLToPath(new URL("../bin/jev-kilo.mjs", import.meta.url));
 
-const managedEnv = ["JEV_KILO_UPSTREAM_BASE_URL", "JEV_KILO_MODEL"] as const;
+const managedEnv = ["JEV_KILO_UPSTREAM_BASE_URL", "JEV_KILO_MODEL", "KILO_CONFIG_CONTENT"] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -202,6 +202,28 @@ describe("jev-kilo spec", () => {
 
   it("adds no leading client args, so a user -m keeps priority", () => {
     expect(kilo.args).toBeUndefined();
+  });
+
+  it("keeps inherited JSONC settings and other providers while replacing gateway wiring", () => {
+    const inherited = `{
+      // The launched process must retain these settings.
+      "permission": { "edit": "ask" },
+      "agent": { "review": { "model": "other/reviewer" } },
+      "plugin": ["local-plugin"],
+      "provider": {
+        "other": { "options": { "baseURL": "https://other.test/v1" } },
+        "jev-gateway": { "options": { "baseURL": "https://old.test" } },
+      },
+    }`;
+    process.env.KILO_CONFIG_CONTENT = inherited;
+    const config = inlineConfig();
+    expect(config.permission).toEqual({ edit: "ask" });
+    expect(config.agent).toEqual({ review: { model: "other/reviewer" } });
+    expect(config.plugin).toEqual(["local-plugin"]);
+    expect(config.provider.other.options.baseURL).toBe("https://other.test/v1");
+    expect(config.provider["jev-gateway"].options.baseURL).toBe(`${origin}/v1`);
+    expect(config.model).toBe("jev-gateway/kilo-auto/free");
+    expect(process.env.KILO_CONFIG_CONTENT).toBe(inherited);
   });
 
   it("prints permanent wiring help whose JSON parses as-is", () => {
