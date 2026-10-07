@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.0](https://github.com/caniko/jev-gateway/compare/v0.5.1...v0.6.0) (2026-10-07)
+
+
+### Added
+
+* add Google Gemini adapter and jev-gemini launcher ([f6b38be](https://github.com/caniko/jev-gateway/commit/f6b38be7daa473171cdddcbe4a26b84804360feb))
+* add Google Gemini adapter and jev-gemini launcher ([0a4f9d4](https://github.com/caniko/jev-gateway/commit/0a4f9d4afaac28f6d719dea775b22d906b82d844))
+* Ask for the Jev key on first run; reach Jev through OpenRouter or Vercel too ([c16ad7b](https://github.com/caniko/jev-gateway/commit/c16ad7be7348d6e19b1f6ffee5ec15e1b86ec821))
+* **brew:** add Homebrew installation support for macOS and Linux ([68a2352](https://github.com/caniko/jev-gateway/commit/68a235273f35edc7eb7abef5a5cfe3571f0acf6e))
+* **brew:** auto-bump tap formula on published releases ([c1642cb](https://github.com/caniko/jev-gateway/commit/c1642cb0e7ea3d98a5e0a8ff90085d5e0ad029b8))
+* jev-devin routes Devin CLI tool calls through Jev ([#44](https://github.com/caniko/jev-gateway/issues/44)) ([f23d1ca](https://github.com/caniko/jev-gateway/commit/f23d1ca8853ac2a8b798caa941b38971b9bcfad4))
+* **kilo:** add jev-kilo, a launcher for Kilo CLI ([#48](https://github.com/caniko/jev-gateway/issues/48)) ([34f6de9](https://github.com/caniko/jev-gateway/commit/34f6de9b38b4f32a50a0f65b262989ae1270405a))
+* **opencode:** add first-class stable support ([1156a68](https://github.com/caniko/jev-gateway/commit/1156a684f0ea2b9614f5ab1c5330e195f00a4e68))
+* **opencode:** add stable launcher ([ada4b01](https://github.com/caniko/jev-gateway/commit/ada4b015ad2b81b28d4872b4a1f728d35ec1a883))
+* reach Jev with an OpenCode Zen key ([#27](https://github.com/caniko/jev-gateway/issues/27)) ([aac48a9](https://github.com/caniko/jev-gateway/commit/aac48a9150fc234369d670ecf881993053198fa1))
+
+
+### Fixed
+
+* **brew:** detect untracked formula on first bump (R3-001) ([e2a0de6](https://github.com/caniko/jev-gateway/commit/e2a0de6af45c1088f8806cf7ef9337aa73c7113a))
+* **claude:** never answer a thinking conversation by itself ([#39](https://github.com/caniko/jev-gateway/issues/39)) ([9ec3e0e](https://github.com/caniko/jev-gateway/commit/9ec3e0e0988137712f42b88b7c2aa0c6ba2e4e9a))
+* **codex:** let Codex's automatic reviewer choose its own tools ([#56](https://github.com/caniko/jev-gateway/issues/56)) ([204d6d5](https://github.com/caniko/jev-gateway/commit/204d6d514fee8032242f0f16d0a0b975d5f81728))
+* **dashboard:** probe unused peer ports less often, and allow ?peers=none ([fbe327d](https://github.com/caniko/jev-gateway/commit/fbe327d4b1cbf4c094074ab837c965ac358808f8))
+* honour JEV_DIRECT_CALLS=false for tools with no open arguments ([aa5af35](https://github.com/caniko/jev-gateway/commit/aa5af3580ff4c30282187cae9f07428c724cb098))
+* keep /health to "ok" once the gateway has a key ([57651ff](https://github.com/caniko/jev-gateway/commit/57651ff8e6d1d40fd0cacabb8941c6703c4a773d)), closes [#8](https://github.com/caniko/jev-gateway/issues/8)
+* keep hostile tool names out of hints, and pass malformed requests through instead of failing ([40fd608](https://github.com/caniko/jev-gateway/commit/40fd60848915dc08e61305b3b1620ac0f035ccfb))
+* keep tool names that are not a single inert token away from Jev and the LLM ([f306026](https://github.com/caniko/jev-gateway/commit/f306026d74156a93f50a5fa9f2b035163a74956c)), closes [#8](https://github.com/caniko/jev-gateway/issues/8)
+* **opencode:** say which agents bypass the gateway, and keep an inherited inline config ([384e7f4](https://github.com/caniko/jev-gateway/commit/384e7f40779c7b12fe2f1625092364ece9abf483))
+* pass Codex subagent requests through instead of taking their tools away ([576d89f](https://github.com/caniko/jev-gateway/commit/576d89f770b4e6397b389fdd1de46665d8fc5f98))
+* pass malformed requests through instead of answering 500 ([174d84a](https://github.com/caniko/jev-gateway/commit/174d84a09cdbb0810409bfb59ac7b74c2a139147)), closes [#8](https://github.com/caniko/jev-gateway/issues/8)
+* pass requests through when a Jev error page cannot fit in a header ([0eab07b](https://github.com/caniko/jev-gateway/commit/0eab07bdc70239c12b6cb71e3ff94cb9b8892915))
+* route Chat Completions requests that also carry built-in tools ([f6fd00c](https://github.com/caniko/jev-gateway/commit/f6fd00c95dc0e6a36bb2ba8b23dcd5aaecce9137)), closes [#8](https://github.com/caniko/jev-gateway/issues/8)
+
 ## [0.5.1](https://github.com/vinilana/jev-gateway/compare/v0.5.0...v0.5.1) (2026-10-06)
 
 
