@@ -79,8 +79,7 @@ function interactionGroups(turns: Turn[]): { start: number; end: number }[] {
 export function buildState(input: Pick<RouterInput, "system" | "turns">, limits: Limits): { [key: string]: Json } {
   const groups = interactionGroups(input.turns);
   const unusable = { conversation: [], unrepresentable: true };
-  // Instruction-only requests still have a representable empty conversation.
-  if (!groups.length) groups.push({ start: 0, end: -1 });
+  if (!groups.length) return unusable;
   const prepare = (start: number, cap: number, end = input.turns.length) => {
     let clipped = false;
     const clip = (text: string): string => {
