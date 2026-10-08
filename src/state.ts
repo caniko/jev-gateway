@@ -53,11 +53,11 @@ function interactionGroups(turns: Turn[]): { start: number; end: number }[] {
       }
     }
     if (turn.role !== "tool_result") return;
-    // Prefer an outstanding wire ID, then use the oldest pending name match.
+    // Prefer an outstanding wire ID; an exhausted known ID is a standalone duplicate.
     // Gemini clients can invent IDs, omit them, or reuse them next exchange.
-    const exact = typeof turn.call_id === "string"
-      ? byId.get(turn.call_id)?.find(call => !call.done) : undefined;
-    const call = exact ?? calls.find(call => !call.done && call.name === turn.tool);
+    const identified = typeof turn.call_id === "string" ? byId.get(turn.call_id) : undefined;
+    const call = identified ? identified.find(call => !call.done)
+      : calls.find(call => !call.done && call.name === turn.tool);
     // Standalone results remain useful routing evidence in their own group.
     if (!call) return;
     call.done = true;
