@@ -10,6 +10,37 @@ const call = (id: string): Turn => ({ role: "assistant", tool_calls: [{ tool: "r
 const result = (id: string, content: string): Turn => ({ role: "tool_result", tool: "read", call_id: id, content });
 
 describe("routing context", () => {
+  it.each(["", "Use the read tool"])("represents instruction-only state %j", (system) => {
+    expect(buildState({ system, turns: [] }, { maxStateChars: 500, maxMessageChars: 4000 }))
+      .toEqual({ ...(system ? { assistant_instructions: system } : {}), conversation: [] });
+  });
+
+  it("clips instruction-only state to the serialized budget", () => {
+    const state = buildState({ system: "Use the read tool ".repeat(100), turns: [] },
+      { maxStateChars: 100, maxMessageChars: 4000 });
+    expect(state.conversation).toEqual([]);
+    expect(state.unrepresentable).toBeUndefined();
+    expect(state.clipped).toBe(true);
+    expect(state.assistant_instructions).toBeTruthy();
+    expect(JSON.stringify(state).length).toBeLessThanOrEqual(100);
+  });
+
+  it("routes chat requests containing only system and developer messages", async () => {
+    const jev = fakeJev({ tool: { choice: "read" }, needs_tool: { noul: 0.99 } });
+    const upstream = fakeUpstream();
+    const app = createApp({ config: testConfig({ directCalls: false }), askJev: jev.askJev, fetch: upstream.fetchImpl });
+    const body = { model: "m", messages: [
+      { role: "system", content: "Use tools" }, { role: "developer", content: "Read the file" },
+    ], tools: [{ type: "function", function: { name: "read", parameters: { type: "object", properties: {} } } }] };
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(response.headers.get("x-jev-gateway-mode")).toBe("forced");
+    expect(jev.requests).toHaveLength(1);
+    expect(jev.requests[0]!.state).toEqual({ assistant_instructions: "Use tools\n\nRead the file", conversation: [] });
+    expect(upstream.calls[0]!.body.messages).toEqual(body.messages);
+  });
+
   it.each(["[truncated] is literal output", "x".repeat(5000)])("still routes after an older tool output is clipped or contains marker text", async (content) => {
     const jev = fakeJev({ tool: { choice: "read" }, needs_tool: { noul: 0.99 } });
     const upstream = fakeUpstream();
