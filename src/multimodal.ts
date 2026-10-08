@@ -9,7 +9,7 @@ const MEDIA_TYPES = new Set([
 ]);
 const RESULT_TYPES = new Set([
   "tool_result", "web_search_tool_result", "web_fetch_tool_result", "tool_search_output",
-  "code_interpreter_call", "code_execution_result", "bash_code_execution_result", "text_editor_code_execution_result",
+  "code_interpreter_call", "image_generation_call", "code_execution_result", "bash_code_execution_result", "text_editor_code_execution_result",
 ]);
 
 function isResult(value: unknown): boolean {
@@ -22,6 +22,7 @@ function hasMedia(content: unknown, depth = 0): boolean {
   if (Array.isArray(content)) return content.some(part => hasMedia(part, depth + 1));
   if (!isRecord(content)) return false;
   if (typeof content.type === "string" && MEDIA_TYPES.has(content.type)) return true;
+  if (content.type === "image_generation_call" && typeof content.result === "string" && content.result.length > 0) return true;
   if (["image_url", "input_audio", "file", "file_id"].some(key => content[key] != null)) return true;
   // Follow protocol content containers, never arbitrary tool arguments/results.
   return isResult(content)
