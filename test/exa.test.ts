@@ -55,9 +55,36 @@ describe("exaAdapter.toInput", () => {
     expect(input.turns[1]).toEqual({
       role: "assistant",
       text: "thinking about it",
-      tool_calls: [{ tool: "exec", arguments: '{"command":"ls"}' }],
+      tool_calls: [{ tool: "exec", call_id: "call_abc#def", arguments: '{"command":"ls"}' }],
     });
-    expect(input.turns[2]).toEqual({ role: "tool_result", tool: "exec", content: "file1 file2" });
+    expect(input.turns[2]).toEqual({ role: "tool_result", tool: "exec", call_id: "call_abc#def", content: "file1 file2" });
+  });
+
+  it("retains Devin dependency spans after a duplicate result without changing the wire request", () => {
+    const call = (id: string) => field(3, 2, concat(
+      field(2, 0, 2n), field(6, 2, concat(utf8(1, id), utf8(2, "exec"), utf8(3, "{}"))),
+    ));
+    const result = (id: string, content: string) => field(3, 2, concat(field(2, 0, 4n), utf8(3, content), utf8(7, id)));
+    const bytes = request(call("a"), result("a", "A"), call("b"), result("a", "duplicate ".repeat(100)), result("b", "B"), toolDef("exec"));
+    const req = parse(bytes);
+    const input = exaAdapter.toInput(req, 4000);
+    if ("skip" in input) throw new Error(input.skip);
+    const smallest = { earlier_turns_omitted: 2, clipped: true, conversation: [
+      { role: "assistant", tool_calls: [{ tool: "exec", call_id: "b", arguments: "" }] },
+      { role: "tool_result", tool: "exec", call_id: "a", content: "" },
+      { role: "tool_result", tool: "exec", call_id: "b", content: "" },
+    ] };
+    const budget = JSON.stringify(smallest).length + 30;
+    const state = buildState(input, { maxMessageChars: 4000, maxStateChars: budget });
+    expect(state.unrepresentable).toBeUndefined();
+    expect(state.earlier_turns_omitted).toBe(2);
+    expect(state.conversation).toEqual([
+      { role: "assistant", tool_calls: [{ tool: "exec", call_id: "b", arguments: "{}" }] },
+      expect.objectContaining({ role: "tool_result", call_id: "a" }),
+      { role: "tool_result", tool: "exec", call_id: "b", content: "B" },
+    ]);
+    expect(JSON.stringify(state).length).toBeLessThanOrEqual(budget);
+    expect(exaAdapter.encode!(req)).toEqual(bytes);
   });
 
   it("leaves thinking intact until state construction records clipping", () => {
@@ -83,7 +110,7 @@ describe("exaAdapter.toInput", () => {
     const input = exaAdapter.toInput(req, 30);
     if ("skip" in input) throw new Error(input.skip);
     expect(input.turns[0]!.text).toBe(long);
-    expect(input.turns[1]!.tool_calls).toEqual([{ tool: "exec", arguments: long }]);
+    expect(input.turns[1]!.tool_calls).toEqual([{ tool: "exec", call_id: "call-long", arguments: long }]);
     expect(input.turns[2]!.content).toBe(long);
     const state = buildState(input, { maxMessageChars: 30, maxStateChars: 2000 });
     expect(state.clipped).toBe(true);
