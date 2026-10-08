@@ -39,6 +39,19 @@ describe("latest-interaction multimodal passthrough", () => {
         { role: "user", content: "continue" },
       ], tools: [{ name: "x", input_schema: parameters }],
     }],
+    ["Responses code-interpreter logs", "/v1/responses", {
+      model: "m", input: [
+        { role: "user", content: "run this" },
+        { type: "code_interpreter_call", id: "ci", status: "completed", outputs: [{ type: "logs", logs: "done" }] },
+      ], tools: [functionTool],
+    }],
+    ["Messages code-execution text results", "/v1/messages", {
+      model: "m", messages: [{ role: "user", content: [
+        { type: "bash_code_execution_tool_result", tool_use_id: "c", content: {
+          type: "bash_code_execution_result", stdout: "done", stderr: "", return_code: 0, content: [],
+        } },
+      ] }], tools: [{ name: "x", input_schema: parameters }],
+    }],
   ])("still routes text-only %s", async (_name, path, body) => {
     const { app, jev, upstream } = chatApp();
     const before = structuredClone(body);
@@ -54,6 +67,17 @@ describe("latest-interaction multimodal passthrough", () => {
     ["/v1/responses", { model: "m", input: [{ role: "user", content: [{ type: "input_file", file_id: "file-1" }] }], tools: [functionTool] }],
     ["/v1/chat/completions", { model: "m", messages: [{ role: "user", content: [{ type: "input_audio", input_audio: { data: "AAA", format: "wav" } }] }], tools: [{ type: "function", function: { name: "x", parameters } }] }],
     ["/v1/messages", { model: "m", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "c", content: [{ type: "document", source: { type: "url", url: "https://example.test/document" } }] }] }], tools: [{ name: "x", input_schema: parameters }] }],
+    ["/v1/responses", { model: "m", input: [
+      { role: "user", content: "plot this" },
+      { type: "code_interpreter_call", id: "ci", status: "completed", outputs: [{ type: "image", url: "https://example.test/plot.png" }] },
+    ], tools: [functionTool] }],
+    ...["code_execution", "bash_code_execution", "text_editor_code_execution"].map(type => ["/v1/messages", {
+      model: "m", messages: [{ role: "user", content: [
+        { type: `${type}_tool_result`, tool_use_id: "c", content: {
+          type: `${type}_result`, content: [{ type: `${type}_output`, file_id: "file-generated" }],
+        } },
+      ] }], tools: [{ name: "x", input_schema: parameters }],
+    }] as const),
   ])("forwards actual attachments unchanged on %s, including streaming", async (path, body) => {
     const { app, jev, upstream } = chatApp();
     const request = { ...body, stream: true };
