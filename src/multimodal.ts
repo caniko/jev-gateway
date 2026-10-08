@@ -9,11 +9,12 @@ const MEDIA_TYPES = new Set([
 ]);
 const RESULT_TYPES = new Set([
   "tool_result", "web_search_tool_result", "web_fetch_tool_result", "tool_search_output",
+  "code_interpreter_call", "code_execution_result", "bash_code_execution_result", "text_editor_code_execution_result",
 ]);
 
 function isResult(value: unknown): boolean {
   return isRecord(value) && typeof value.type === "string"
-    && (RESULT_TYPES.has(value.type) || value.type.endsWith("_call_output"));
+    && (RESULT_TYPES.has(value.type) || value.type.endsWith("_call_output") || value.type.endsWith("_tool_result"));
 }
 
 function hasMedia(content: unknown, depth = 0): boolean {
@@ -24,7 +25,8 @@ function hasMedia(content: unknown, depth = 0): boolean {
   if (["image_url", "input_audio", "file", "file_id"].some(key => content[key] != null)) return true;
   // Follow protocol content containers, never arbitrary tool arguments/results.
   return isResult(content)
-    && (hasMedia(content.content, depth + 1) || hasMedia(content.output, depth + 1));
+    && (hasMedia(content.content, depth + 1) || hasMedia(content.output, depth + 1)
+      || (content.type === "code_interpreter_call" && hasMedia(content.outputs, depth + 1)));
 }
 
 function latestBatch(items: unknown[], result: (item: unknown) => boolean): unknown[] {
