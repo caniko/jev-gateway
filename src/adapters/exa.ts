@@ -88,7 +88,7 @@ function toInput(req: ExaRequest): RouterInput | { skip: string } {
         const id = text(first(cf, 1));
         const name = text(first(cf, 2));
         if (id && name) toolNameByCallId.set(id, name);
-        return { tool: name || "unknown", arguments: text(first(cf, 3)) };
+        return { tool: name || "unknown", ...(id ? { call_id: id } : {}), arguments: text(first(cf, 3)) };
       });
       const thinking = text(first(f, 11));
       turns.push({
@@ -97,9 +97,11 @@ function toInput(req: ExaRequest): RouterInput | { skip: string } {
         ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
       });
     } else if (role === 4) {
+      const id = text(first(f, 7));
       turns.push({
         role: "tool_result",
-        tool: toolNameByCallId.get(text(first(f, 7))) ?? "unknown",
+        tool: toolNameByCallId.get(id) ?? "unknown",
+        ...(id ? { call_id: id } : {}),
         content: body,
       });
     }
