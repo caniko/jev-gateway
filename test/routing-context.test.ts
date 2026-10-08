@@ -116,6 +116,24 @@ describe("routing context", () => {
     expect(state.conversation).toEqual(turns);
   });
 
+  it("does not let an exhausted result ID consume a later same-name call", () => {
+    const turns = [call("a"), result("a", "A"), call("b"), result("a", "duplicate ".repeat(100)), result("b", "B")];
+    const smallest = { earlier_turns_omitted: 2, clipped: true, conversation: [
+      { ...call("b"), tool_calls: [{ tool: "read", call_id: "b", arguments: "" }] },
+      result("a", ""), result("b", ""),
+    ] };
+    const budget = JSON.stringify(smallest).length + 30;
+    const state = buildState({ system: "", turns }, { maxStateChars: budget, maxMessageChars: 4000 });
+    expect(JSON.stringify(state).length).toBeLessThanOrEqual(budget);
+    expect(state.unrepresentable).toBeUndefined();
+    expect(state.earlier_turns_omitted).toBe(2);
+    const kept = state.conversation as Turn[];
+    expect(kept).toHaveLength(3);
+    expect(kept[0]!.tool_calls).toEqual([{ tool: "read", call_id: "b", arguments: "{}" }]);
+    expect(kept[2]!.call_id).toBe("b");
+    expect(kept[2]!.content).toBe("B");
+  });
+
   it("keeps observed Gemini IDs without manufacturing absent IDs", () => {
     const input = geminiAdapter.toInput({ contents: [
       { role: "model", parts: [{ functionCall: { id: "g1", name: "read", args: {} } }] },
