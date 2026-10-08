@@ -45,6 +45,18 @@ describe("latest-interaction multimodal passthrough", () => {
         { type: "code_interpreter_call", id: "ci", status: "completed", outputs: [{ type: "logs", logs: "done" }] },
       ], tools: [functionTool],
     }],
+    ["Responses image-generation trace without an image", "/v1/responses", {
+      model: "m", input: [
+        { role: "user", content: "draw this" },
+        { type: "image_generation_call", id: "ig", status: "failed", result: null },
+      ], tools: [functionTool],
+    }],
+    ["Responses older generated image", "/v1/responses", {
+      model: "m", input: [
+        { type: "image_generation_call", id: "ig", status: "completed", result: "aW1hZ2U=" },
+        { role: "user", content: "continue" },
+      ], tools: [functionTool],
+    }],
     ["Messages code-execution text results", "/v1/messages", {
       model: "m", messages: [{ role: "user", content: [
         { type: "bash_code_execution_tool_result", tool_use_id: "c", content: {
@@ -70,6 +82,10 @@ describe("latest-interaction multimodal passthrough", () => {
     ["/v1/responses", { model: "m", input: [
       { role: "user", content: "plot this" },
       { type: "code_interpreter_call", id: "ci", status: "completed", outputs: [{ type: "image", url: "https://example.test/plot.png" }] },
+    ], tools: [functionTool] }],
+    ["/v1/responses", { model: "m", input: [
+      { role: "user", content: "draw this" },
+      { type: "image_generation_call", id: "ig", status: "completed", result: "aW1hZ2U=" },
     ], tools: [functionTool] }],
     ...["code_execution", "bash_code_execution", "text_editor_code_execution"].map<[string, Record<string, unknown>]>(type => ["/v1/messages", {
       model: "m", messages: [{ role: "user", content: [
