@@ -62,7 +62,7 @@ describe("latest-interaction multimodal passthrough", () => {
     expect(body).toEqual(before);
   });
 
-  it.each([
+  it.each<[string, Record<string, unknown>]>([
     ["/v1/responses", { model: "m", input: [{ type: "computer_call_output", call_id: "c", output: { type: "computer_screenshot", image_url: "https://example.test/image" } }], tools: [functionTool] }],
     ["/v1/responses", { model: "m", input: [{ role: "user", content: [{ type: "input_file", file_id: "file-1" }] }], tools: [functionTool] }],
     ["/v1/chat/completions", { model: "m", messages: [{ role: "user", content: [{ type: "input_audio", input_audio: { data: "AAA", format: "wav" } }] }], tools: [{ type: "function", function: { name: "x", parameters } }] }],
@@ -71,13 +71,13 @@ describe("latest-interaction multimodal passthrough", () => {
       { role: "user", content: "plot this" },
       { type: "code_interpreter_call", id: "ci", status: "completed", outputs: [{ type: "image", url: "https://example.test/plot.png" }] },
     ], tools: [functionTool] }],
-    ...["code_execution", "bash_code_execution", "text_editor_code_execution"].map(type => ["/v1/messages", {
+    ...["code_execution", "bash_code_execution", "text_editor_code_execution"].map<[string, Record<string, unknown>]>(type => ["/v1/messages", {
       model: "m", messages: [{ role: "user", content: [
         { type: `${type}_tool_result`, tool_use_id: "c", content: {
           type: `${type}_result`, content: [{ type: `${type}_output`, file_id: "file-generated" }],
         } },
       ] }], tools: [{ name: "x", input_schema: parameters }],
-    }] as const),
+    }]),
   ])("forwards actual attachments unchanged on %s, including streaming", async (path, body) => {
     const { app, jev, upstream } = chatApp();
     const request = { ...body, stream: true };
